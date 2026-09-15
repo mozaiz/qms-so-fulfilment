@@ -1,29 +1,28 @@
-"""Combine QMS screen captures into a compact preview grid."""
+"""Stitch QMS screenshots into two readable strips.
+
+    ./venv/bin/python make_preview.py
+
+Produces screens/deploy.png  (setup story) and screens/workflow.png (daily use).
+"""
 import os
 from PIL import Image, ImageDraw, ImageFont
 
 D = "/home/mozaiz/workspace/qms/screens"
-PANELS = [
-    ("1_login.png", "LOGIN — PILIH ROLE"),
-    ("2_scanner_scan.png", "SCANNER — SCAN SO"),
-    ("4_pos_ambill.png", "POS — AMBIL SO"),
-    ("6_backstore.png", "BACKSTORE — HANTAR KE POS"),
-    ("8_manager_stats.png", "MANAGER — STATS"),
-]
-COLS = 3
 
-imgs = [Image.open(os.path.join(D, n)).convert("RGB") for n, _ in PANELS]
-titles = [t for _, t in PANELS]
+STRIPS = {
+    "deploy": [
+        ("1_login.png", "SIGN-IN — TAP YOUR ROLE"),
+        ("2_setup.png", "SETUP — ADDRESS + QR TO PRINT"),
+        ("3_setup_pos.png", "MANAGER — ADD POS COUNTERS"),
+    ],
+    "workflow": [
+        ("4_scanner.png", "SCANNER — SCAN THE SO"),
+        ("5_pos.png", "POS — CLAIM THE SO"),
+        ("6_backstore.png", "BACKSTORE — DELIVER TO POS"),
+    ],
+}
 
-PAD, GAP, TOP, TGAP = 22, 18, 46, 34
-cw = max(i.width for i in imgs)
-ch = max(i.height for i in imgs)
-rows = (len(imgs) + COLS - 1) // COLS
-
-W = PAD * 2 + COLS * cw + (COLS - 1) * GAP
-H = PAD * 2 + rows * (TOP + ch) + (rows - 1) * TGAP
-sheet = Image.new("RGB", (W, H), "#0d1117")
-d = ImageDraw.Draw(sheet)
+GAP, PAD, TOP = 18, 22, 46
 
 
 def font(sz):
@@ -36,14 +35,19 @@ def font(sz):
     return ImageFont.load_default()
 
 
-f = font(21)
-for idx, (im, t) in enumerate(zip(imgs, titles)):
-    r, c = divmod(idx, COLS)
-    x = PAD + c * (cw + GAP)
-    y = PAD + r * (TOP + ch + TGAP)
-    d.text((x, y), t, fill="#58a6ff", font=f)
-    sheet.paste(im, (x, y + TOP))
-
-out = "/home/mozaiz/workspace/qms/screens/preview.png"
-sheet.save(out)
-print("wrote", out, sheet.size)
+for name, panels in STRIPS.items():
+    imgs = [Image.open(os.path.join(D, n)).convert("RGB") for n, _ in panels]
+    titles = [t for _, t in panels]
+    W = PAD * 2 + sum(i.width for i in imgs) + GAP * (len(imgs) - 1)
+    H = PAD * 2 + TOP + max(i.height for i in imgs)
+    sheet = Image.new("RGB", (W, H), "#0d1117")
+    d = ImageDraw.Draw(sheet)
+    f = font(21)
+    x = PAD
+    for im, t in zip(imgs, titles):
+        d.text((x, PAD), t, fill="#58a6ff", font=f)
+        sheet.paste(im, (x, PAD + TOP))
+        x += im.width + GAP
+    out = f"/home/mozaiz/workspace/qms/screens/{name}.png"
+    sheet.save(out)
+    print("wrote", out, sheet.size)

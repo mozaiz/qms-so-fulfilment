@@ -782,6 +782,7 @@ cat > "$APP_DIR/qms.sh" <<HELPER
 #   ./qms.sh log         follow the log
 #   ./qms.sh backup      take a backup right now
 #   ./qms.sh uninstall   remove the program, keep the data
+#   ./qms.sh doctor      something is wrong — collect everything at once
 
 APP_DIR="$APP_DIR"
 LABEL="$LABEL"
@@ -831,16 +832,108 @@ case "\$1" in
     ;;
   start)
     svc start
-    sleep 2
-    exec "\$APP_DIR/install.sh" --status ;;
+    sleep 3
+    if curl -fsS --max-time 4 "http://127.0.0.1:\$PORT/api/health" >/dev/null 2>&1; then
+      exec "\$APP_DIR/install.sh" --status
+    else
+      echo "It still is not answering. Running the full check:"
+      echo
+      exec "\$0" doctor
+    fi ;;
   restart)
     "\$0" stop >/dev/null 2>&1
     "\$0" start ;;
+  doctor)
+    echo "QMS doctor — everything that could be wrong, in one go"
+    echo
+    echo "--- this computer"
+    echo "  system   : \$(uname -s) \$(uname -r)"
+    if [ "\$OS" = macos ]; then
+      echo "  version  : \$(sw_vers -productVersion 2>/dev/null)  (\$(uname -m))"
+    fi
+    echo "  app dir  : \$APP_DIR"
+    echo "  port     : \$PORT"
+
+    echo
+    echo "--- files"
+    for f in app.py qms.env qms.sh qms-backup.sh qms.db; do
+      if [ -e "\$APP_DIR/\$f" ]; then echo "  ok       \$f"; else echo "  MISSING  \$f"; fi
+    done
+    if [ -x "\$APP_DIR/venv/bin/python" ]; then
+      if "\$APP_DIR/venv/bin/python" -c 'import fastapi, uvicorn' 2>/dev/null; then
+        echo "  ok       venv (fastapi + uvicorn import fine)"
+      else
+        echo "  BROKEN   venv exists but cannot import fastapi"
+        echo "           fix with: cd \$APP_DIR && ./venv/bin/pip install -r requirements.txt"
+      fi
+    else
+      echo "  MISSING  venv — re-run the installer"
+    fi
+
+    echo
+    echo "--- the service"
+    if [ "\$OS" = macos ]; then
+      if launchctl print "gui/\$(id -u)/\$LABEL" >/dev/null 2>&1; then
+        echo "  loaded   \$LABEL"
+      else
+        echo "  NOT LOADED  \$LABEL"
+        echo "           fix with: sh \$0 start"
+      fi
+      PLIST="\$HOME/Library/LaunchAgents/\$LABEL.plist"
+      if [ -f "\$PLIST" ]; then
+        echo "  exists   \$PLIST"
+      else
+        echo "  MISSING  \$PLIST — re-run the installer"
+      fi
+    else
+      if systemctl is-active --quiet qms 2>/dev/null; then
+        echo "  running  system service 'qms'"
+      elif systemctl --user is-active --quiet qms 2>/dev/null; then
+        echo "  running  user service 'qms'"
+      else
+        echo "  NOT RUNNING  systemd unit 'qms'"
+        echo "           fix with: sh \$0 start"
+      fi
+    fi
+
+    echo
+    echo "--- is anything listening on \$PORT"
+    # curl rather than /dev/tcp: this script runs under /bin/sh, which is dash on
+    # Ubuntu and dash has no /dev/tcp at all.
+    if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:\$PORT/" 2>/dev/null; then
+      echo "  yes, something is on \$PORT"
+    else
+      echo "  NOTHING is listening on \$PORT"
+    fi
+
+    echo
+    echo "--- does it answer"
+    H="\$(curl -fsS --max-time 4 "http://127.0.0.1:\$PORT/api/health" 2>/dev/null)"
+    if [ -n "\$H" ]; then
+      echo "  yes: \$H"
+    else
+      echo "  no answer from http://127.0.0.1:\$PORT/api/health"
+    fi
+
+    echo
+    echo "--- the log"
+    if [ -f "\$APP_DIR/qms.log" ]; then
+      echo "  \$APP_DIR/qms.log (last 20 lines)"
+      tail -20 "\$APP_DIR/qms.log" | sed 's/^/    /'
+    else
+      echo "  no qms.log — the process has never run, so this is a service problem"
+    fi
+    if [ -s "\$APP_DIR/qms.err.log" ]; then
+      echo
+      echo "  \$APP_DIR/qms.err.log (last 20 lines)"
+      tail -20 "\$APP_DIR/qms.err.log" | sed 's/^/    /'
+    fi
+    ;;
   ""|-h|--help|help)
-    sed -n '2,13p' "\$0" ;;
+    sed -n '2,14p' "\$0" ;;
   *)
     echo "Unknown command: \$1"
-    sed -n '2,13p' "\$0"
+    sed -n '2,14p' "\$0"
     exit 1 ;;
 esac
 HELPER
@@ -950,7 +1043,20 @@ VER="$(curl -fsS --max-time 3 "http://127.0.0.1:$QMS_PORT/api/health" 2>/dev/nul
 if [ "$READY" = "1" ]; then
   ok "QMS is answering on port $QMS_PORT${VER:+  (v$VER)}"
 else
-  warn "not answering yet on port $QMS_PORT — check the log below"
+  # "check the log below" is useless advice when the process never ran, so say
+  # what actually happened and give the one command that diagnoses it.
+  bad "QMS is NOT answering on port $QMS_PORT"
+  printf '\n    Something did not start. Run this and it will tell you exactly what:\n\n'
+  printf '        sh %s/qms.sh doctor\n' "$APP_DIR"
+  if [ -f "$APP_DIR/qms.log" ]; then
+    printf '\n    Last lines of %s/qms.log:\n\n' "$APP_DIR"
+    tail -15 "$APP_DIR/qms.log" | sed 's/^/        /'
+  else
+    printf '\n    There is no log yet, so the server process never ran at all —\n'
+    printf '    that is a service problem, not an app problem. Try:\n\n'
+    printf '        sh %s/qms.sh start\n' "$APP_DIR"
+  fi
+  printf '\n'
 fi
 
 cat <<SUMMARY

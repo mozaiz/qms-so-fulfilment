@@ -114,6 +114,7 @@ sh qms.sh url         the address each device should open
 sh qms.sh log         follow the log
 sh qms.sh backup      take a backup right now
 sh qms.sh uninstall   remove the program, keep the data
+sh qms.sh doctor      something is wrong — collect everything at once
 ```
 
 Or, from anywhere: `./install.sh --status`
@@ -168,6 +169,21 @@ and its virtual environment. It **deliberately keeps** the data, and says so.
 `--purge` deletes everything with no undo — and it refuses to run unless
 `--uninstall` is also present, so a stray `--purge` can never mean anything on
 its own. Neither will touch a directory that is not a QMS install.
+
+### When nothing works, run the doctor
+
+```bash
+sh qms.sh doctor
+```
+
+It prints the OS, the install folder, the port, which files are present, whether
+the service is loaded, whether anything is listening, whether it answers, and the
+last 20 lines of the log — in one pasteable block. `qms.sh start` runs it
+automatically if the server does not come up, and the installer runs it if the
+first boot fails. No guessing.
+
+If there is **no `qms.log` at all**, the server process never ran — that is a
+service problem, not an application problem, and the doctor says so.
 
 ### Version
 
@@ -454,7 +470,7 @@ python3 -m venv venv
 | `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
-| `deploy/test_lifecycle.py` | 32 | install → uninstall → **re-install with the data intact** → purge, and that a bare `--purge` refuses |
+| `deploy/test_lifecycle.py` | 44 | install → uninstall → **re-install with the data intact** → purge, that a bare `--purge` refuses, and that `qms.sh doctor` correctly reports a stopped install and a running one |
 
 The installer tests install into a throwaway directory on a free port and run the
 real API suite against what they installed — an installer verified by reading it

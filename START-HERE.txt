@@ -72,7 +72,12 @@ touched by stopping or starting — the database just sits there.
     sh qms.sh log         watch the log
     sh qms.sh backup      take a backup right now
 
+    sh qms.sh doctor      something is wrong — collect everything at once
+
 Common one: it says "Answering: no" -> sh qms.sh restart
+
+Still nothing? sh qms.sh doctor  and send the whole output on. It says which
+part is broken, and whether the app ever ran at all.
 
 
 REMOVING QMS

@@ -200,6 +200,28 @@ check("qms.sh stop works and reassures about data", "data is not touched" in r.s
 r = sh(["sh", f"{APP}/qms.sh", "nonsense"], cwd=APP, env=install_env())
 check("qms.sh rejects an unknown command", r.returncode != 0)
 
+print("\n== qms.sh doctor — the thing you run when nothing works ==")
+r = sh(["sh", f"{APP}/qms.sh", "doctor"], cwd=APP, env=install_env())
+check("doctor exits 0", r.returncode == 0)
+check("doctor names the port", "port" in r.stdout.lower())
+check("doctor checks the files", "app.py" in r.stdout and "venv" in r.stdout)
+for want in ("--- the service", "listening", "does it answer", "the log"):
+    check(f"doctor section: {want}", want in r.stdout)
+check("doctor reports nothing listening while stopped", "NOTHING is listening" in r.stdout)
+check("doctor says there is no log yet", "no qms.log" in r.stdout)
+
+# and with the server actually up, doctor must notice
+p = boot()
+r = sh(["sh", f"{APP}/qms.sh", "doctor"], cwd=APP, env=install_env())
+check("doctor sees it answering when up", "yes:" in r.stdout)
+check("doctor sees the database", "ok       qms.db" in r.stdout)
+p.terminate()
+p.wait(timeout=15)
+
+print("\n== safety: a failed start must diagnose itself, not lie ==")
+r = sh(["sh", f"{APP}/qms.sh", "start"], cwd=APP, env=install_env(), timeout=120)
+check("a failed start runs doctor instead of pretending", "QMS doctor" in r.stdout)
+
 for d in (SRC, APP, SCRATCH):
     shutil.rmtree(d, ignore_errors=True)
 for f in ("/tmp/lc.tar.gz",):

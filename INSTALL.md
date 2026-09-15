@@ -259,6 +259,7 @@ sh qms.sh restart     # stop, then start
 sh qms.sh url         # the address each device should open
 sh qms.sh log         # follow the log
 sh qms.sh backup      # take a backup right now
+sh qms.sh doctor      # nothing works — dump everything worth knowing
 ```
 
 Or from anywhere: `bash install.sh --status`

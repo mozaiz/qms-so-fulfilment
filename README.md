@@ -375,7 +375,7 @@ Everything lives in `qms.env` (see `qms.env.example`).
 |---|---|---|
 | `QMS_PORT` | `8099` | Port |
 | `QMS_DB` | `<dir>/qms.db` | SQLite file |
-| `QMS_STORE_CODE` | `MCSQ01` | Store code, shown on the QR sign |
+| `QMS_STORE_CODE` | *(blank)* | Store code, shown on the QR sign. Set per outlet |
 | `QMS_STORE_NAME` | `Machines Store` | Display name |
 | `QMS_POS_COUNT` | `4` | Counters on a fresh install |
 | `QMS_MAX_POS` | `20` | Ceiling for the Add POS button |

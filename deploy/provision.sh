@@ -5,7 +5,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/qms}"
 APP_USER="${APP_USER:-$USER}"
-STORE_CODE="${STORE_CODE:-MCSQ01}"
+STORE_CODE="${STORE_CODE:-}"
 STORE_NAME="${STORE_NAME:-Machines Store}"
 TUNNEL_HOSTNAME="${TUNNEL_HOSTNAME:-}"     # e.g. qms-store12.mozaiz.my
 TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"           # from Cloudflare Zero Trust dashboard

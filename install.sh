@@ -22,7 +22,7 @@
 # Options (env vars):
 #   APP_DIR=/opt/qms        where to install   (macOS default: ~/QMS)
 #   QMS_PORT=8099           port to listen on
-#   STORE_CODE=MCSQ01       store identifier (shows on the setup page)
+#   STORE_CODE=AB01          store identifier (blank by default)
 #   STORE_NAME="..."        store display name
 #   SERVICE=system|user|launchagent|none   default: auto
 #   NO_SUDO=1               never call sudo
@@ -95,7 +95,7 @@ else
   SERVICE="${SERVICE:-auto}"
 fi
 QMS_PORT="${QMS_PORT:-8099}"
-STORE_CODE="${STORE_CODE:-MCSQ01}"
+STORE_CODE="${STORE_CODE:-}"
 STORE_NAME="${STORE_NAME:-Machines Store}"
 NO_SUDO="${NO_SUDO:-0}"
 NO_START="${NO_START:-0}"
@@ -126,7 +126,7 @@ do_help() {
   Options you can put in front:
 
       QMS_PORT=8099                   port to listen on     (default 8099)
-      STORE_CODE=MCSQ01               store identifier
+      STORE_CODE=AB01                 store identifier (blank by default)
       STORE_NAME="Machines Alor Setar"  what the sign-in screen shows
       APP_DIR=/opt/qms                where to install (default ~/QMS on macOS)
 

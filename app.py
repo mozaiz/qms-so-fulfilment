@@ -45,8 +45,10 @@ COMPLETE_MINUTES = int(os.environ.get("QMS_COMPLETE_MIN", "10"))  # at counter -
 DEDUPE_MINUTES = int(os.environ.get("QMS_DEDUPE_MIN", "5"))
 
 POS_COUNT = int(os.environ.get("QMS_POS_COUNT", "4"))
-STORE_CODE = os.environ.get("QMS_STORE_CODE", "MCSQ01")
-STORE_NAME = os.environ.get("QMS_STORE_NAME", "Machines — Pilot Store")
+# No store-specific default. Each outlet sets its own in qms.env; blank until
+# they do, and the Setup screen is where it gets filled in.
+STORE_CODE = os.environ.get("QMS_STORE_CODE", "")
+STORE_NAME = os.environ.get("QMS_STORE_NAME", "")
 
 ROLE_SCANNER = "scanner"
 ROLE_POS = "pos"

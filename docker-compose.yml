@@ -12,7 +12,7 @@ services:
     ports:
       - "8099:8099"
     environment:
-      QMS_STORE_CODE: "MCSQ01"
+      QMS_STORE_CODE: ""
       QMS_STORE_NAME: "Machines Store"
       QMS_SLA_MIN: "10"
       QMS_STALE_MIN: "15"

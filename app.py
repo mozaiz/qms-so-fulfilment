@@ -280,7 +280,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.6.0", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:

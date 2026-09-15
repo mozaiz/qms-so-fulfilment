@@ -75,8 +75,11 @@ def check(name, cond):
 
 
 def start():
+    # sys.executable, not APP/venv/bin/python: CI installs the dependencies into
+    # the runner's interpreter and there is no venv/ in the checkout. Running
+    # with the same interpreter that runs this test is correct everywhere.
     return subprocess.Popen(
-        [f"{APP}/venv/bin/python", "-m", "uvicorn", "app:app",
+        [sys.executable, "-m", "uvicorn", "app:app",
          "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
         cwd=APP, env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

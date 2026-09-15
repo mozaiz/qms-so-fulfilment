@@ -20,6 +20,7 @@ jobs:
         # TypeError on 3.9 — modelling it here is the only thing that catches
         # that class of bug, and 3.12 alone never will.
         python: ["3.9", "3.12"]
+        port: [8199, 8299]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,26 +49,34 @@ jobs:
       # The important assertion is the concurrent-claim one: fire 4 simultaneous
       # claims at the same SO and require exactly one winner. That invariant is
       # the reason this app uses SQLite instead of a CSV file.
+      # QMS_PORT is threaded through to the server and every suite below.
+      # The two matrix jobs share a runner's port space, so they cannot both be
+      # 8099 — and worse, a stray listener from an earlier step makes a suite
+      # fail in a way that looks like an app bug.
       - name: Run API test suite
+        env:
+          QMS_PORT: ${{ matrix.port }}
         run: |
           set -e
-          uvicorn app:app --host 127.0.0.1 --port 8099 > /tmp/qms.log 2>&1 &
+          uvicorn app:app --host 127.0.0.1 --port "$QMS_PORT" > /tmp/qms.log 2>&1 &
           SERVER=$!
           trap 'kill $SERVER 2>/dev/null || true' EXIT
 
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8099/api/health >/dev/null && break
+            curl -sf http://127.0.0.1:"$QMS_PORT"/api/health >/dev/null && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:8099/api/health | tee /dev/stderr
+          curl -sf http://127.0.0.1:"$QMS_PORT"/api/health | tee /dev/stderr
 
           python seed_demo.py
-          python test_flow.py http://127.0.0.1:8099
+          python test_flow.py http://127.0.0.1:"$QMS_PORT"
 
       # The installer, the data-survives-a-restart guarantee, and the
       # install/uninstall lifecycle. These are the promises a store is told to
       # rely on, so they are asserted rather than described.
       - name: Installer, persistence and lifecycle suites
+        env:
+          QMS_PORT: ${{ matrix.port }}
         run: |
           set -e
           bash deploy/test_install_linux.sh

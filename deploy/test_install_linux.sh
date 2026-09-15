@@ -31,7 +31,7 @@ mkdir -p /tmp/qms-lintest-src
 ( cd "$SRC" && tar cf - --exclude=venv --exclude='*.db*' --exclude=.git \
     --exclude=screens --exclude=__pycache__ . ) | ( cd /tmp/qms-lintest-src && tar xf - )
 
-APP_DIR="$D" QMS_PORT=8111 STORE_CODE=LIN01 STORE_NAME="Linux Test Outlet" \
+APP_DIR="$D" QMS_PORT="${QMS_PORT:-8111}" STORE_CODE=LIN01 STORE_NAME="Linux Test Outlet" \
   SERVICE=none NO_SUDO=1 NO_START=1 bash /tmp/qms-lintest-src/install.sh > /tmp/qms-lin.log 2>&1
 chk "installer exits 0" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 
@@ -55,22 +55,22 @@ grep -q 'QMS_COMPLETE_MIN' "$D/qms.env"         && chk "QMS_COMPLETE_MIN in the 
 echo
 echo "== running the installed app against the full test suite =="
 cd "$D" || exit 1
-QMS_PORT=8111 QMS_DB="$D/qms.db" QMS_STORE_CODE=LIN01 QMS_STORE_NAME="Linux Test Outlet" \
-  ./venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8111 --log-level warning \
+QMS_PORT="${QMS_PORT:-8111}" QMS_DB="$D/qms.db" QMS_STORE_CODE=LIN01 QMS_STORE_NAME="Linux Test Outlet" \
+  ./venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port "${QMS_PORT:-8111}" --log-level warning \
   > "$D/srv.log" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 
 for _ in $(seq 1 25); do
-  curl -fsS --max-time 2 http://127.0.0.1:8111/api/health >/dev/null 2>&1 && break
+  curl -fsS --max-time 2 http://127.0.0.1:"${QMS_PORT:-8111}"/api/health >/dev/null 2>&1 && break
   sleep 1
 done
-HEALTH="$(curl -fsS --max-time 3 http://127.0.0.1:8111/api/health 2>/dev/null)"
+HEALTH="$(curl -fsS --max-time 3 http://127.0.0.1:"${QMS_PORT:-8111}"/api/health 2>/dev/null)"
 echo "$HEALTH" | grep -q '"ok":true' && chk "installed instance is healthy" 1 || chk "installed instance is healthy" 0
 echo "        $HEALTH"
 
 ./venv/bin/python seed_demo.py >/dev/null 2>&1
-OUT="$(./venv/bin/python "$SRC/test_flow.py" http://127.0.0.1:8111 2>&1 | tail -4)"
+OUT="$(./venv/bin/python "$SRC/test_flow.py" http://127.0.0.1:"${QMS_PORT:-8111}" 2>&1 | tail -4)"
 echo "$OUT" | grep -q 'ALL GREEN' && chk "test_flow.py ALL GREEN against the installed copy" 1 \
                                  || chk "test_flow.py ALL GREEN against the installed copy" 0
 echo "        $(echo "$OUT" | grep -o 'PASSED [0-9]* / [0-9]*')"

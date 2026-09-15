@@ -13,7 +13,9 @@ import time
 import urllib.error
 import urllib.request
 
-APP = "/home/mozaiz/workspace/qms"
+# Repo root, derived rather than hardcoded: this runs in CI on a GitHub runner
+# where no such path exists.
+APP = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 D = f"/tmp/persist-test-{os.getpid()}"
 
 # A previous failed run can leave a server listening, which then serves a

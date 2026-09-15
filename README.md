@@ -28,13 +28,50 @@ Runs on **one small computer inside the store**. Every device in that store just
 opens a web address. No cloud account, no subscription, **no data leaves the
 building**.
 
+Runs on **macOS** (any Mac, including the iMac at the counter), **Linux** (a mini
+PC, a spare desktop, a Raspberry Pi) and **Windows**. One installer, one command,
+the same on all of them — the platform is detected rather than chosen.
+
 ---
 
 ## Quick start
 
+One line, on the machine that will run it — Linux, macOS, or a mini PC:
+
 ```bash
-./install.sh          # Linux / macOS — installs, starts on boot, prints the address
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash
 ```
+
+Or from a checkout: `./install.sh`
+
+Not sure the machine is up to it? Ask first — **this changes nothing**:
+
+```bash
+./install.sh --check
+```
+
+```
+==> Checking this computer
+
+    macOS 14.5                         Intel (x86_64)
+    Disk free                          178 GB
+    Memory                             16 GB
+
+    Python (needs 3.9 or newer)
+      ✓ /usr/local/bin/python3         3.11.9   <- will use this
+      ! /usr/bin/python3               3.9.6    venv support incomplete
+
+    Port 8099                          free
+    Existing install                   none — fresh install
+
+    Result: READY
+      Nothing needs installing on this computer.
+      It will download the app, then about 25 MB of Python packages.
+```
+
+Nothing is downloaded, nothing is written, no service is touched — so it is safe
+on a machine you have not decided about yet. A normal install runs the same
+checks first and reports before it touches anything.
 
 Windows: copy the folder and double-click `deploy\Install QMS (Windows).cmd`.
 
@@ -53,7 +90,7 @@ Then print the wall sign — this is the entire staff training:
 To cut a release:
 
 ```bash
-git tag v0.3.1 && git push origin v0.3.1
+git tag v0.6.0 && git push origin v0.6.0
 ```
 
 CI builds the archives, **installs one in a clean container and boots it** to prove
@@ -61,6 +98,83 @@ it works, then attaches `qms-<version>.zip`, `.tar.gz` and `SHA256SUMS.txt` to t
 release.
 
 Licence: MIT — see [LICENSE](LICENSE).
+
+---
+
+## Running it day to day
+
+From the install folder. Nobody needs to remember `launchctl` or `systemctl`:
+
+```
+sh qms.sh status      is it running, where is the data, when was the last backup
+sh qms.sh stop        take it down
+sh qms.sh start       bring it back
+sh qms.sh restart     stop, then start
+sh qms.sh url         the address each device should open
+sh qms.sh log         follow the log
+sh qms.sh backup      take a backup right now
+sh qms.sh uninstall   remove the program, keep the data
+```
+
+Or, from anywhere: `./install.sh --status`
+
+```
+==> QMS status
+    Service        loaded
+    Answering      yes — v0.5.0 on port 8099
+    Data           ~/QMS/qms.db  (60K)
+                   412 SOs in total — 37 on the most recent day (2026-09-15)
+    Last backup    qms_2026-09-15_0330  (30 kept)
+
+    Open on this computer : http://localhost:8099
+    Open on other devices : http://192.168.0.31:8099
+```
+
+### Stopping and starting does not touch your data
+
+The database is one file, `qms.db`. Stopping QMS closes it cleanly; starting it
+opens the same file. **Nothing is cleared, reset or re-seeded on boot.** A
+re-install over the top reuses it too, so an upgrade never costs the day's queue.
+
+This is proved, not asserted. `deploy/test_persistence.py` writes real data,
+then for each of *polite stop (SIGTERM) → start → **hard kill (SIGKILL, the
+power-cut case)** → start → re-install over the top*, checks the SOs and the
+audit trail are all still there. It also asserts `app.py` contains no destructive
+SQL against the business tables, so a future edit cannot quietly add one.
+
+### Removing it
+
+```bash
+./install.sh --uninstall          # remove the program. KEEP the data.
+./install.sh --uninstall --purge  # remove the program AND delete the data.
+```
+
+```
+==> Removing QMS
+    ✓ the program has been removed
+
+    KEPT, in ~/QMS:
+
+      qms.db        your data — every SO ever scanned
+      backups/      the nightly copies
+      qms.env       the store settings
+
+    Deleting a day of queue history by accident is unforgivable, so
+    this was kept on purpose. Nothing is running any more.
+```
+
+`--uninstall` stops the service, removes it from startup, and deletes the program
+and its virtual environment. It **deliberately keeps** the data, and says so.
+`--purge` deletes everything with no undo — and it refuses to run unless
+`--uninstall` is also present, so a stray `--purge` can never mean anything on
+its own. Neither will touch a directory that is not a QMS install.
+
+### Version
+
+The sign-in screen shows `App vX · Server vY`, and every top bar carries a small
+`vX` pill. When a phone is still running an older build than the server, a red
+bar appears across the top with a **RELOAD** button — a cached client otherwise
+looks exactly like a broken fix.
 
 ---
 
@@ -190,9 +304,14 @@ deactivated rather than deleted, so the audit trail survives.
 
 ## Statuses and attention flags
 
-`scanned` → `assigned` → `delivered`, or `cancelled`
+`scanned` → `assigned` → `delivered` → `completed`, or `cancelled`
 
-Shown to staff as **WAITING / CLAIMED / DELIVERED / CANCELLED**.
+Shown to staff as **WAITING / PENDING STOCK / DELIVERED / COMPLETED / CANCELLED**.
+
+`assigned` is *pending stock* — the counter has it but the item has not arrived.
+`delivered` is *at the counter* — the item is physically there and the POS has not
+closed the entry yet. `completed` is the only terminal state, and the only one
+that takes an SO out of the queue.
 
 ### Nothing leaves the queue until the POS closes it
 
@@ -214,7 +333,7 @@ it". The boundary is enforced in the database, not just by hiding buttons:
 - an SO **no POS ever claimed** → `403` for a POS, backstore may still deliver it (flagged)
 - the backstore → may deliver, may **not** complete
 
-Three things turn a card **red** — flagged, never auto-actioned:
+Four things turn a card **red** — flagged, never auto-actioned:
 
 - **Stale** — scanned but no POS claimed it within `QMS_STALE_MIN` (15 min)
 - **Over SLA** — claimed but backstore has not delivered within `QMS_SLA_MIN` (10 min)
@@ -320,15 +439,32 @@ python3 -m venv venv
 
 ```bash
 ./venv/bin/python seed_demo.py                              # reset + demo state
-./venv/bin/python test_flow.py                              # 30 checks, incl. concurrency
+./venv/bin/python test_flow.py                              # 50 checks, incl. concurrency
 ./venv/bin/python test_flow.py http://host:port             # against any instance
 ./venv/bin/python make_test_barcodes.py                     # printable test barcode sheet
 ./venv/bin/python make_qr_card.py                           # printable A4 wall sign
 ./venv/bin/python make_preview.py                           # stitch screenshots
 ```
 
-CI (`.github/workflows/ci.yml`) runs the suite and a clean-database boot smoke test
-on every push.
+### Test suites
+
+| Suite | Checks | What it protects |
+|---|---|---|
+| `test_flow.py` | 50 | The API, the four stages, the FIFO ordering, and **four simultaneous claims on one SO resolving to exactly one winner** |
+| `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
+| `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
+| `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
+| `deploy/test_lifecycle.py` | 32 | install → uninstall → **re-install with the data intact** → purge, and that a bare `--purge` refuses |
+
+The installer tests install into a throwaway directory on a free port and run the
+real API suite against what they installed — an installer verified by reading it
+is not verified. CI runs all of them on every push, plus a clean-database boot
+smoke test.
+
+The macOS suite runs on Linux by stubbing the platform binaries, so the parts
+that break in practice — interpreter discovery, plist generation, path quoting —
+are covered without a Mac. It deliberately installs into a path **containing a
+space**, because macOS home directories often do.
 
 > Reaching a phone over HTTPS while developing:
 > `cloudflared tunnel --config /dev/null --url http://localhost:8099`
@@ -362,3 +498,26 @@ on every push.
   fallback look broken when it works fine under a real tap. Drive it with a trusted
   mouse event (CDP `Input.dispatchMouseEvent`) before believing a copy button is
   broken.
+- **Probe `ensurepip`, not `venv`.** On Debian and Ubuntu `import venv` succeeds
+  while `ensurepip` is missing, so a version-only check picks a Python that then
+  dies during `python -m venv` with a message pointing at the wrong fix. Select on
+  version **and** `ensurepip`.
+- **`set -e` plus a failing command substitution kills an installer silently.**
+  `VAR="$(some_command)"` inherits the exit status, so one failing `df` aborts the
+  script with no output at all. Every substitution used in an assignment ends in
+  `|| true`.
+- **BSD and GNU userland differ where you cannot debug it.** `xargs -r`,
+  `readlink -f`, `hostname -I`, `sed -i` and `stat -c` are GNU-only;
+  `df -g` is the macOS spelling; macOS `/bin/bash` is 3.2, so no `${v,,}` or
+  `mapfile`. `readlink` without `-f` and `/dev/tcp` are fine on both.
+- **Do not depend on a CLI that might not be installed.** The backup job used
+  `/usr/bin/sqlite3` — always present on macOS, often missing on Linux, so the
+  backup silently produced nothing. It uses the venv's Python and
+  `sqlite3.Connection.backup()` instead, which is the correct online-backup API
+  anyway.
+- **A macOS LaunchAgent starts at login, not at boot.** Keep automatic login on
+  for a POS Mac, and wrap the server in `caffeinate -disu` so it does not
+  idle-sleep and drop every other counter off the LAN.
+- **Do not use `cron` on macOS** for the nightly backup: it needs Full Disk
+  Access and silently does nothing without it. Use a second LaunchAgent with
+  `StartCalendarInterval`.

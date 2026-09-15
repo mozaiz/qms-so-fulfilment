@@ -40,35 +40,24 @@ esac
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '    \033[0;32m✓\033[0m %s\n' "$*"; }
 warn() { printf '    \033[0;33m!\033[0m %s\n' "$*"; }
+bad()  { printf '    \033[0;31m✗\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[0;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# When run as `curl | bash` there is no checkout, so unpack into a temp dir and
-# install from there. Otherwise $SRC_DIR is the directory holding this script.
+# `--check` inspects the machine and stops. Nothing is downloaded, nothing is
+# written, no service is touched — so it is safe to run anywhere, including on a
+# machine you have not decided to deploy to yet.
+CHECK_ONLY="${CHECK_ONLY:-0}"
+for _a in "$@"; do
+  case "$_a" in --check|-c|--dry-run) CHECK_ONLY=1 ;; esac
+done
+
 REPO_SLUG="${QMS_REPO:-mozaiz/qms-so-fulfilment}"
 
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 else
   SRC_DIR=""
-fi
-
-# `curl ... | bash` leaves no checkout to install from, so fetch one. This is
-# the path store staff actually take, so it has to work with nothing but a
-# terminal and an internet connection.
-if [ -z "$SRC_DIR" ]; then
-  printf '\n\033[1;36m==> Downloading QMS\033[0m\n'
-  # Not `[ -n x ] && die` — a false test returns 1 and `set -e` kills the script.
-  if ! have curl; then
-    die "curl is required to download the app, and it is not installed"
-  fi
-  DL="$(mktemp -d)"
-  curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/main" \
-    | tar xz -C "$DL" 2>/dev/null \
-    || die "could not download the app — check this computer's internet connection"
-  SRC_DIR="$(find "$DL" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
-  [ -n "$SRC_DIR" ] || die "the downloaded archive was empty"
-  printf '    \033[0;32m✓\033[0m downloaded %s\n' "$(basename "$SRC_DIR")"
 fi
 
 if [ "$OS" = macos ]; then
@@ -92,12 +81,16 @@ if [ "$OS" = linux ] && [ "$NO_SUDO" != "1" ] && have sudo && sudo -n true 2>/de
   SUDO="sudo"
 fi
 
-# Are we installing over the directory we are running from? Then do not copy.
-SELF_INSTALL=0
-if [ -n "$SRC_DIR" ] && [ "$SRC_DIR" = "$APP_DIR" ]; then SELF_INSTALL=1; fi
-
-# ---------------------------------------------------------------- 1. python
-say "Checking Python (need 3.9 or newer)"
+# ================================================================ 0. PREFLIGHT
+#
+# Check everything this app needs and REPORT it, before a single byte is
+# written or downloaded. Two reasons:
+#
+#   1. Someone standing at a POS counter needs to know "will this work here"
+#      before committing, and needs to be told exactly what is about to be
+#      downloaded on a machine that may be on a mobile hotspot.
+#   2. When something is missing, the fix is a single specific command. Finding
+#      that out now beats failing four minutes into an install.
 
 # Print "X.Y" for an interpreter, or nothing if it does not run at all.
 # /usr/bin/python3 on a Mac with no Command Line Tools pops a GUI installer and
@@ -112,58 +105,261 @@ py_ver() {
 # that actually matters.
 has_ensurepip() { "$1" -c 'import ensurepip' >/dev/null 2>&1; }
 
-PY=""
-PY_V=""
-PY_NEEDS=""      # right version, but venv support missing
-PY_NEEDS_V=""
-# Candidates in preference order. Homebrew first: it is the newest, and being on
-# PATH means the user installed it deliberately.
-for cand in python3 python3.13 python3.12 python3.11 python3.10 python3.9 \
-            /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
-  case "$cand" in /*) [ -x "$cand" ] || continue ;; *) have "$cand" || continue ;; esac
-  v="$(py_ver "$cand")"
-  [ -n "$v" ] || continue
-  maj="${v%%.*}"; min="${v##*.}"
-  if [ "$maj" -gt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -ge 9 ]; }; then
+PY=""; PY_V=""
+PY_NEEDS=""; PY_NEEDS_V=""      # right version, venv support incomplete
+PY_OK_LIST=""                   # report lines
+PY_BAD_LIST=""
+PY_SEEN=""                      # resolved paths, to dedupe
+
+# Follow symlinks without `readlink -f`, which is a GNU extension macOS does
+# not have. python3 and python3.11 are usually the same binary under two names,
+# and listing it twice makes the report look broken.
+resolve_py() {
+  p="$1"
+  case "$p" in
+    /*) : ;;
+    *)  p="$(command -v "$p" 2>/dev/null || echo "$p")" ;;
+  esac
+  n=0
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    t="$(readlink "$p" 2>/dev/null || echo '')"
+    [ -n "$t" ] || break
+    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    n=$((n + 1))
+  done
+  echo "$p"
+}
+
+choose_python() {
+  # Candidates in preference order. Homebrew first: it is the newest, and being
+  # on PATH means the user installed it deliberately.
+  # PY_CANDIDATES overrides the list — useful when an interpreter lives
+  # somewhere unusual.
+  for cand in ${PY_CANDIDATES:-python3 python3.13 python3.12 python3.11 python3.10 python3.9 \
+              /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3}; do
+    case "$cand" in /*) [ -x "$cand" ] || continue ;; *) have "$cand" || continue ;; esac
+    _rp="$(resolve_py "$cand" || true)"
+    [ -n "$_rp" ] || _rp="$cand"
+    case "$PY_SEEN" in *"|$_rp|"*) continue ;; esac
+    PY_SEEN="$PY_SEEN|$_rp|"
+    v="$(py_ver "$cand")"
+    [ -n "$v" ] || continue
+    maj="${v%%.*}"; min="${v##*.}"
+    [ "$maj" -gt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -ge 9 ]; } || continue
     if has_ensurepip "$cand"; then
-      PY="$cand"; PY_V="$v"; break
-    elif [ -z "$PY_NEEDS" ]; then
-      PY_NEEDS="$cand"; PY_NEEDS_V="$v"
+      PY_OK_LIST="$PY_OK_LIST$cand|$v|$(command -v "$cand" 2>/dev/null || echo "$cand")
+"
+      if [ -z "$PY" ]; then PY="$cand"; PY_V="$v"; fi
+    else
+      PY_BAD_LIST="$PY_BAD_LIST$cand|$v
+"
+      if [ -z "$PY_NEEDS" ]; then PY_NEEDS="$cand"; PY_NEEDS_V="$v"; fi
+    fi
+  done
+}
+
+# Can we open a TCP connection to this port? /dev/tcp is a bash builtin, present
+# in the bash 3.2 that macOS still ships.
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
+
+# Is whatever holds this port actually a QMS? On a re-run it will be ours, and
+# moving to a different port every upgrade would be worse than useless.
+port_is_our_qms() {
+  curl -fsS --max-time 2 "http://127.0.0.1:$1/api/health" 2>/dev/null | grep -q '"ok":true'
+}
+
+MACHINE_OS=""; MACHINE_CPU=""; MACHINE_RAM=""; MACHINE_DISK=""; CTL_CMD=""
+
+gather_machine() {
+  # Every substitution here ends in `|| true`. Under `set -e` an assignment
+  # inherits the substitution's exit status, so one failing `df` would abort the
+  # whole preflight and print nothing at all.
+  MACHINE_CPU="$(uname -m 2>/dev/null || echo '?')"
+  if [ "$OS" = macos ]; then
+    MACHINE_OS="macOS $(sw_vers -productVersion 2>/dev/null || echo '?')"
+    _b="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+    if [ "$_b" -gt 0 ] 2>/dev/null; then MACHINE_RAM="$(( _b / 1048576 )) MB"; fi
+    _g="$(df -g "$HOME" 2>/dev/null | awk 'NR==2{print $4}' || true)"
+    if [ -n "${_g:-}" ]; then MACHINE_DISK="$_g GB"; fi
+  else
+    MACHINE_OS="Linux $(uname -r 2>/dev/null || echo '?')"
+    _k="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || true)"
+    if [ -n "${_k:-}" ]; then MACHINE_RAM="$_k MB"; fi
+    _g="$(df -BG "$HOME" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4}' || true)"
+    if [ -n "${_g:-}" ]; then MACHINE_DISK="$_g GB"; fi
+  fi
+}
+
+# When something is missing, this is the ONE command that fixes it.
+remedy_line() {
+  if [ "$OS" = macos ]; then
+    if have brew; then
+      printf 'Homebrew is installed, so I can fetch Python for you (about 40 MB).\n'
+    else
+      printf 'Run this one command, click "Install" in the window that appears,\n'
+      printf 'wait for it to finish, then run me again:\n\n'
+      printf '        xcode-select --install\n\n'
+      printf "That installs Apple's Command Line Tools, which include Python 3.\n"
+    fi
+  else
+    if have apt-get || have dnf || have yum; then
+      printf "I can install it with this system's package manager.\n"
+    else
+      printf 'Install Python 3.9 or newer, then run me again.\n'
     fi
   fi
-done
+}
+
+PREFLIGHT_READY=0
+
+preflight() {
+  gather_machine
+  choose_python
+
+  if [ "$OS" = macos ]; then CTL_CMD="launchctl"; else CTL_CMD="systemctl"; fi
+
+  printf '\n\033[1;36m==> Checking this computer\033[0m\n\n'
+  printf '    %-34s %s\n' "$MACHINE_OS" "$MACHINE_CPU"
+  printf '    %-34s %s\n' "Disk free"   "${MACHINE_DISK:-?}"
+  printf '    %-34s %s\n' "Memory"      "${MACHINE_RAM:-?}"
+
+  printf '\n    \033[1mPython\033[0m (needs 3.9 or newer)\n'
+  if [ -n "$PY_OK_LIST" ]; then
+    printf '%s' "$PY_OK_LIST" | while IFS='|' read -r c v p; do
+      [ -n "$c" ] || continue
+      if [ "$c" = "$PY" ]; then
+        printf '      \033[0;32m✓\033[0m %-28s %-8s \033[0;32m<- will use this\033[0m\n' "$p" "$v"
+      else
+        printf '      \033[0;32m✓\033[0m %-28s %s\n' "$p" "$v"
+      fi
+    done
+  fi
+  if [ -n "$PY_BAD_LIST" ]; then
+    printf '%s' "$PY_BAD_LIST" | while IFS='|' read -r c v; do
+      [ -n "$c" ] || continue
+      printf '      \033[0;33m!\033[0m %-28s %-8s venv support incomplete\n' "$c" "$v"
+    done
+  fi
+  if [ -z "$PY_OK_LIST" ] && [ -z "$PY_BAD_LIST" ]; then
+    printf '      \033[0;31m✗\033[0m none found\n'
+  fi
+
+  # Port
+  PORT_CHOSEN="$QMS_PORT"
+  PORT_NOTE="free"
+  if port_in_use "$QMS_PORT"; then
+    if port_is_our_qms "$QMS_PORT"; then
+      PORT_NOTE="in use by QMS (this is an upgrade)"
+    else
+      while port_in_use "$PORT_CHOSEN" && [ "$PORT_CHOSEN" -lt $((QMS_PORT + 20)) ]; do
+        PORT_CHOSEN=$((PORT_CHOSEN + 1))
+      done
+      PORT_NOTE="taken by something else — will use $PORT_CHOSEN"
+    fi
+  fi
+
+  # Existing install
+  if [ -f "$APP_DIR/app.py" ]; then INSTALL_NOTE="found in $APP_DIR — will upgrade"; else INSTALL_NOTE="none — fresh install"; fi
+
+  printf '\n    %-34s %s\n' "Port $QMS_PORT" "$PORT_NOTE"
+  printf '    %-34s %s\n' "Existing install" "$INSTALL_NOTE"
+
+  # ---- verdict
+  printf '\n'
+  if [ -n "$PY_OK_LIST" ]; then
+    PREFLIGHT_READY=1
+    printf '    \033[1;32mResult: READY\033[0m\n'
+    printf '      Nothing needs installing on this computer.\n'
+    printf '      It will download the app, then about 25 MB of Python packages.\n'
+  elif [ -n "$PY_NEEDS" ]; then
+    PREFLIGHT_READY=1
+    printf '    \033[1;32mResult: READY\033[0m (after one repair)\n'
+    printf '      Python %s is here but cannot make a virtual environment yet.\n' "$PY_NEEDS_V"
+    printf '      I will fix that first.\n'
+  else
+    PREFLIGHT_READY=0
+    printf '    \033[1;33mResult: ONE STEP NEEDED\033[0m\n\n'
+    printf '      \033[1mMissing: Python 3.9 or newer\033[0m\n\n'
+    remedy_line | sed 's/^/      /'
+  fi
+  printf '\n'
+}
+
+preflight
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  if [ "$PREFLIGHT_READY" = "1" ]; then
+    printf '    Nothing was changed. Run the same command without --check to install.\n\n'
+    exit 0
+  fi
+  printf '    Nothing was changed. Install Python 3.9+ first, then run this again.\n\n'
+  exit 1
+fi
+
+if [ "$PREFLIGHT_READY" != "1" ]; then
+  die "Cannot continue without Python 3.9 or newer."
+fi
+
+QMS_PORT="$PORT_CHOSEN"
+
+# `curl ... | bash` leaves no checkout to install from, so fetch one. This is
+# the path store staff actually take, so it has to work with nothing but a
+# terminal and an internet connection.
+if [ -z "$SRC_DIR" ]; then
+  printf '\033[1;36m==> Downloading QMS\033[0m\n'
+  # Not `[ -n x ] && die` — a false test returns 1 and `set -e` kills the script.
+  if ! have curl; then
+    die "curl is required to download the app, and it is not installed"
+  fi
+  DL="$(mktemp -d)"
+  curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/main" \
+    | tar xz -C "$DL" 2>/dev/null \
+    || die "could not download the app — check this computer's internet connection"
+  SRC_DIR="$(find "$DL" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+  [ -n "$SRC_DIR" ] || die "the downloaded archive was empty"
+  ok "downloaded $(basename "$SRC_DIR")"
+fi
+
+# Are we installing over the directory we are running from? Then do not copy.
+SELF_INSTALL=0
+if [ -n "$SRC_DIR" ] && [ "$SRC_DIR" = "$APP_DIR" ]; then SELF_INSTALL=1; fi
+
+# ---------------------------------------------------------------- 1. python
+say "Preparing Python"
 
 # A usable-but-incomplete interpreter: repair it rather than making the user
 # work out which distro package is missing.
 if [ -z "$PY" ] && [ -n "$PY_NEEDS" ]; then
-  warn "$PY_NEEDS is python $PY_NEEDS_V but its venv support is incomplete — fixing"
-  if have apt-get; then
+  if have brew; then
+    warn "$PY_NEEDS has incomplete venv support — installing a complete Python via Homebrew"
+    brew install python || true
+  elif have apt-get; then
+    warn "$PY_NEEDS is python $PY_NEEDS_V but its venv support is incomplete — fixing"
     $SUDO apt-get update -qq || true
     $SUDO apt-get install -y -qq "python3${PY_NEEDS_V}-venv" 2>/dev/null \
       || $SUDO apt-get install -y -qq python3-venv 2>/dev/null || true
   elif have dnf; then
     $SUDO dnf install -y -q "python${PY_NEEDS_V}-pip" 2>/dev/null || true
   fi
-  if has_ensurepip "$PY_NEEDS"; then PY="$PY_NEEDS"; PY_V="$PY_NEEDS_V"; fi
+  # Re-scan from scratch: Homebrew may have just added a new python3.
+  PY=""; PY_V=""; PY_OK_LIST=""
+  choose_python
+  if [ -z "$PY" ] && has_ensurepip "$PY_NEEDS"; then PY="$PY_NEEDS"; PY_V="$PY_NEEDS_V"; fi
 fi
 
+# Still nothing? Install one.
 if [ -z "$PY" ]; then
   if [ "$OS" = macos ]; then
-    warn "no python3 found"
     if have brew; then
-      ok "installing python via Homebrew"
+      warn "installing Python via Homebrew"
       brew install python
-      PY="$(command -v python3)"; PY_V="$(py_ver "$PY")"
+      PY="$(command -v python3 2>/dev/null || true)"; PY_V="$(py_ver "$PY")"
     else
-      # This is the single most likely macOS stumbling block, so be explicit
-      # and give one clickable command rather than a paragraph.
       die "No Python 3.9+ on this Mac.
 
-    Easiest fix — run this, click \"Install\" on the popup, then re-run me:
+    Run this, click \"Install\" on the popup, then run me again:
 
-        xcode-select --install
-
-    That installs Apple's Command Line Tools, which include Python 3."
+        xcode-select --install"
     fi
   else
     warn "installing python3"
@@ -179,6 +375,10 @@ if [ -z "$PY" ]; then
     fi
     PY="python3"; PY_V="$(py_ver python3)"
   fi
+fi
+
+if [ -z "$PY" ] || [ -z "$PY_V" ]; then
+  die "Could not find or install a usable Python 3.9+."
 fi
 
 has_ensurepip "$PY" || die "$PY (python $PY_V) cannot create a virtual environment.
@@ -368,6 +568,42 @@ BK
 elif [ "$OS" = macos ]; then
   # launchd rather than cron: cron needs Full Disk Access on modern macOS and
   # silently does nothing without it. A LaunchAgent always works.
+  #
+  # The work lives in its own script rather than a long inline `sh -c` string:
+  # it stays readable, and it keeps the plist free of shell quoting.
+  #
+  # It uses the venv's Python rather than the sqlite3 command line. The python
+  # is already here, whereas the sqlite3 binary is not guaranteed on Linux, and
+  # `Connection.backup()` IS the online backup API — a copy taken with `cp`
+  # while the app is writing gives a file that cannot be restored.
+  #
+  # No `xargs` either: GNU has `-r`, BSD does not, and the difference only shows
+  # up on the machine you cannot easily debug.
+  cat > "$APP_DIR/qms-backup.sh" <<BK
+#!/bin/sh
+# Nightly QMS database backup, 30 day retention. Local only.
+APP_DIR="$APP_DIR"
+STAMP=\$(date +%F_%H%M)
+mkdir -p "\$APP_DIR/backups" || exit 1
+
+"\$APP_DIR/venv/bin/python" - "\$APP_DIR/qms.db" "\$APP_DIR/backups/qms_\$STAMP.db" <<'PYEOF'
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = sqlite3.connect(src)
+d = sqlite3.connect(dst)
+with d:
+    s.backup(d)     # consistent snapshot, safe while the server is writing
+s.close()
+d.close()
+PYEOF
+
+# keep the newest 30, delete anything older
+ls -t "\$APP_DIR"/backups/qms_*.db 2>/dev/null | tail -n +31 | while read -r f; do
+  rm -f "\$f"
+done
+BK
+  chmod +x "$APP_DIR/qms-backup.sh"
+
   BPLIST="$HOME/Library/LaunchAgents/$LABEL.backup.plist"
   cat > "$BPLIST" <<BPL
 <?xml version="1.0" encoding="UTF-8"?>
@@ -378,12 +614,14 @@ elif [ "$OS" = macos ]; then
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>-c</string>
-    <string>mkdir -p "$APP_DIR/backups" &amp;&amp; /usr/bin/sqlite3 "$APP_DIR/qms.db" ".backup '$APP_DIR/backups/qms_$(date +%F_%H%M).db'" &amp;&amp; ls -t "$APP_DIR"/backups/qms_*.db | tail -n +31 | xargs -r rm -f</string>
+    <string>$APP_DIR/qms-backup.sh</string>
   </array>
+  <key>WorkingDirectory</key><string>$APP_DIR</string>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
   <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>$APP_DIR/qms-backup.log</string>
+  <key>StandardErrorPath</key><string>$APP_DIR/qms-backup.err.log</string>
 </dict>
 </plist>
 BPL

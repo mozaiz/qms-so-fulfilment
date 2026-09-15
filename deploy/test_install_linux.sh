@@ -11,6 +11,9 @@ cd "$SRC" || exit 1
 PASS=0; FAIL=0
 chk() { if [ "$2" = "1" ]; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
 
+# The interpreter has to have ensurepip or venv creation legitimately fails.
+REAL_PY_DIR="$(cd "$(dirname "$(command -v python3)")" && pwd)"
+
 echo "============================================================"
 echo "install.sh — Linux path"
 echo "============================================================"
@@ -73,6 +76,20 @@ echo "$OUT" | grep -q 'ALL GREEN' && chk "test_flow.py ALL GREEN against the ins
 echo "        $(echo "$OUT" | grep -o 'PASSED [0-9]* / [0-9]*')"
 
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+
+echo
+echo "== --check: inspect without changing anything =="
+env -i PATH="$REAL_PY_DIR:/usr/local/bin:/usr/bin:/bin" HOME=/tmp \
+  bash /tmp/qms-lintest-src/install.sh --check > /tmp/qms-lin-check.log 2>&1
+chk "--check exits 0 on a capable machine" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+grep -q 'Result: READY'       /tmp/qms-lin-check.log && chk "reports READY" 1 || chk "reports READY" 0
+grep -q 'Nothing was changed' /tmp/qms-lin-check.log && chk "changes nothing" 1 || chk "changes nothing" 0
+
+env -i PATH="/usr/bin:/bin" HOME=/tmp PY_CANDIDATES=/nonexistent/python3 \
+  bash /tmp/qms-lintest-src/install.sh --check > /tmp/qms-lin-no.log 2>&1
+chk "--check with no Python exits nonzero" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+grep -q 'ONE STEP NEEDED' /tmp/qms-lin-no.log && chk "says ONE STEP NEEDED" 1 || chk "says ONE STEP NEEDED" 0
+grep -q "package manager" /tmp/qms-lin-no.log && chk "offers the Linux fix" 1 || chk "offers the Linux fix" 0
 
 echo
 echo "============================================================"

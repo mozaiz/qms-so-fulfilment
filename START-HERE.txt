@@ -1,9 +1,21 @@
 QMS — SO Fulfilment
 ===================
 
-HOW TO INSTALL ON A MAC
------------------------
+FIRST: CHECK THIS MAC CAN RUN IT
+--------------------------------
+This only LOOKS at your Mac. It changes nothing and downloads nothing.
 
+    bash install.sh --check
+
+It tells you what your Mac has, what is missing, and the exact command that
+fixes anything it finds. On a Mac the one missing thing is almost always
+Python, and the fix is the single command it prints for you.
+
+Run it first. If it says READY, carry on below.
+
+
+HOW TO INSTALL
+--------------
 1. Open Terminal.  (Press Command+Space, type Terminal, press Enter.)
 
 2. Type  cd  then a SPACE, drag the folder you just unzipped into the
@@ -21,6 +33,10 @@ HOW TO INSTALL ON A MAC
 
    Use the SCANNER role on this computer — the camera only works here.
 
+If you are not sure, just run  bash install.sh  — it checks everything first
+and tells you what it is going to do before it does it.
+
+
 WHAT EACH ROLE OPENS
 --------------------
    SCANNER   ->  http://localhost:8099        (this Mac, camera works)
@@ -30,14 +46,26 @@ WHAT EACH ROLE OPENS
    The installer prints <this-mac-ip> at the end. It is also on the
    Setup screen inside the app, with a QR code you can scan.
 
+
+MACOS WILL ASK TWO QUESTIONS THE FIRST TIME — ALLOW BOTH
+--------------------------------------------------------
+   1. "Do you want the application python to accept incoming network
+       connections?"       ->  ALLOW
+   2. "...allow to find devices on local networks"   ->  ALLOW
+
+Without them, the other counters cannot reach this Mac. If you dismissed
+them: System Settings -> Network -> Firewall -> Options -> allow python.
+
+Also keep automatic login ON for this Mac. QMS starts when you log in.
+
+
 IF SOMETHING GOES WRONG
 -----------------------
    Read the log:
        tail -f ~/QMS/qms.log
 
-   Not reachable from other devices? macOS asked something like
-   "Do you want the application python to accept incoming network
-   connections?" — you must click ALLOW.
-
    App looks out of date? There is a red bar at the top of the screen.
    Tap RELOAD.
+
+   Nothing else working? Run the check again and read what it says:
+       cd ~/QMS && bash install.sh --check

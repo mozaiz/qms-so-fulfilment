@@ -58,6 +58,21 @@ curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/insta
 Either way it takes 2–4 minutes. When it prints **Done**, open
 `http://localhost:8099`.
 
+**Not sure if the Mac is up to it? Check first — this changes nothing:**
+
+```bash
+bash install.sh --check
+```
+
+It prints the macOS version, the chip, free disk, memory, every Python it can
+find, whether the port is free, and whether an older install is already there —
+then says either **READY** or **ONE STEP NEEDED** with the exact command that
+fixes it. Nothing is downloaded, nothing is written, no service is touched, so
+it is safe to run on a machine you have not decided about yet.
+
+You do not have to run it separately — a normal install does the same checks
+first and prints the same report before it touches anything.
+
 What it sets up, so you know what to expect:
 
 - Installs into **`~/QMS`** (your home folder — no `sudo`, no password needed).

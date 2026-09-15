@@ -112,7 +112,7 @@ echo "        QMS_DB=$QMS_DB"
 echo
 echo "== plists are structurally valid (plistlib) =="
 python3 - "$PLIST" "$BKPLIST" "$APP" <<'PY'
-import plistlib, sys, os
+import plistlib, sys, os, re
 main, bk, app = sys.argv[1], sys.argv[2], sys.argv[3]
 fail = 0
 
@@ -140,8 +140,17 @@ with open(bk, "rb") as f:
     b = plistlib.load(f)
 bkargs = b.get("ProgramArguments", [])
 ck("backup agent has a daily schedule", b.get("StartCalendarInterval") == {"Hour": 3, "Minute": 30})
-ck("backup uses an sqlite .backup, not cp", any(".backup" in a for a in bkargs))
-ck("backup path is quoted inside the shell string", any('"' + app + '/backups"' in a for a in bkargs))
+ck("backup agent runs the backup script", bool(bkargs) and bkargs[-1].endswith("qms-backup.sh"))
+
+with open(os.path.join(app, "qms-backup.sh")) as f:
+    bks = f.read()
+ck("backup uses sqlite's online backup API, not cp", ".backup(" in bks)
+ck("backup has a retention window", "tail -n +31" in bks)
+# The script expands $APP_DIR rather than baking in a literal path, so check
+# that every expansion is quoted. The behavioural proof is above: the whole
+# suite runs with a space in the install path and the backup file appears.
+ck("every $APP_DIR expansion in the backup script is quoted",
+   not re.search(r'(?<!")[$]APP_DIR', bks))
 sys.exit(1 if fail else 0)
 PY
 [ $? -eq 0 ] && chk "plist assertions all passed" 1 || chk "plist assertions all passed" 0
@@ -173,6 +182,47 @@ grep -q 'launchctl kickstart -k' /tmp/qms-mac.log && chk "tells the operator how
 grep -q 'accept incoming network'  /tmp/qms-mac.log && chk "warns about the macOS firewall prompt" 1 || chk "warns about the macOS firewall prompt" 0
 grep -q 'localhost'                /tmp/qms-mac.log && chk "prints the localhost address" 1 || chk "prints the localhost address" 0
 grep -q '10.9.8.77'                /tmp/qms-mac.log && chk "prints the LAN address from ipconfig" 1 || chk "prints the LAN address" 0
+
+echo
+echo "== the backup job actually runs, and is portable =="
+[ -f "$APP/qms-backup.sh" ] && chk "backup script written" 1 || chk "backup script written" 0
+sh -n "$APP/qms-backup.sh" 2>/dev/null && chk "backup script is valid sh" 1 || chk "backup script is valid sh" 0
+# `xargs -r` is a GNU extension; BSD xargs on macOS rejects it outright.
+# strip comments first: prose about xargs is not a call to xargs
+if grep -v '^[[:space:]]*#' "$APP/qms-backup.sh" 2>/dev/null | grep -q 'xargs'; then
+  chk "no GNU-only xargs in the backup" 0
+else
+  chk "no GNU-only xargs in the backup" 1
+fi
+"$APP/venv/bin/python" -c "import sqlite3;c=sqlite3.connect('$APP/qms.db');c.execute('create table if not exists t(x)');c.commit()" 2>/dev/null
+sh "$APP/qms-backup.sh" >/dev/null 2>&1
+if ls "$APP"/backups/qms_*.db >/dev/null 2>&1; then
+  chk "backup script produced a backup file" 1
+else
+  chk "backup script produced a backup file" 0
+fi
+# run it 3x: retention must not eat itself
+sh "$APP/qms-backup.sh" >/dev/null 2>&1; sh "$APP/qms-backup.sh" >/dev/null 2>&1
+_n="$(ls "$APP"/backups/qms_*.db 2>/dev/null | wc -l | tr -d ' ')"
+[ "$_n" -ge 1 ] && chk "re-running the backup keeps the latest ($_n files)" 1 \
+                || chk "re-running the backup keeps the latest" 0
+
+echo
+echo "== --check: inspect a machine without changing anything =="
+env -i PATH="$STUB:$REAL_PY_DIR:/usr/local/bin:/usr/bin:/bin" HOME="$FAKE_HOME" \
+  APP_DIR="$APP" QMS_PORT=8123 bash /tmp/qms-mac-src/install.sh --check > /tmp/qms-check-ok.log 2>&1
+chk "--check on a capable Mac exits 0" "$([ $? -eq 0 ] && echo 1 || echo 0)"
+grep -q 'Result: READY'      /tmp/qms-check-ok.log && chk "--check reports READY" 1 || chk "--check reports READY" 0
+grep -q 'Nothing was changed' /tmp/qms-check-ok.log && chk "--check changes nothing" 1 || chk "--check changes nothing" 0
+grep -q 'Disk free'          /tmp/qms-check-ok.log && chk "--check reports disk + memory" 1 || chk "--check reports disk + memory" 0
+
+# No python, no homebrew, no package manager — the exact fix must be printed.
+env -i PATH="$STUB:/usr/bin:/bin" HOME="$FAKE_HOME" PY_CANDIDATES=/nonexistent/python3 \
+  bash /tmp/qms-mac-src/install.sh --check > /tmp/qms-check-no.log 2>&1
+chk "--check with no Python exits nonzero" "$([ $? -ne 0 ] && echo 1 || echo 0)"
+grep -q 'ONE STEP NEEDED'       /tmp/qms-check-no.log && chk "says ONE STEP NEEDED" 1 || chk "says ONE STEP NEEDED" 0
+grep -q 'xcode-select --install' /tmp/qms-check-no.log && chk "prints the exact macOS fix" 1 || chk "prints the exact macOS fix" 0
+grep -q 'Python 3.9 or newer'   /tmp/qms-check-no.log && chk "names what is missing" 1 || chk "names what is missing" 0
 
 echo
 echo "============================================================"

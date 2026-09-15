@@ -1,4 +1,9 @@
-"""Reset the QMS v3 database and create a realistic SO-fulfilment demo state."""
+"""Reset the database and create a realistic demo state.
+
+Covers every stage of the handover so the UI can be checked at a glance:
+
+    scanned -> assigned (Pending Stock) -> delivered (At Counter) -> completed
+"""
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -27,48 +32,54 @@ def ts(mins_ago):
     return (now - timedelta(minutes=mins_ago)).isoformat(timespec="seconds")
 
 
-# (so_number, scan_ago, pos, claim_ago, deliver_ago, status, reason)
+# (so_number, scan_ago, pos, claim_ago, deliver_ago, complete_ago, status)
 SEED = [
-    # still waiting for a POS -> the 18-min one trips the STALE red flag
-    ("MACSO26-00142463", 18, None, None, None, "scanned", None),
-    ("MACSO26-00142464",  6, None, None, None, "scanned", None),
-    # claimed, backstore still to deliver
-    ("MACSO26-00142465",  9, 3, 7, None, "assigned", None),
-    ("MACSO26-00142466",  4, 1, 3, None, "assigned", None),
-    # delivered normally
-    ("MACSO26-00142460", 25, 2, 24, 22, "delivered", None),
-    ("MACSO26-00142458", 40, 4, 39, 35, "delivered", None),
-    # delivered with no POS ever claiming it -> warning flag
-    ("MACSO26-00142455", 12, None, None, 9, "delivered", None),
+    # nobody has claimed these yet -> the 18 min one trips the STALE flag
+    ("MACSO26-00142463", 18, None, None, None, None, "scanned"),
+    ("MACSO26-00142464",  6, None, None, None, None, "scanned"),
+    # claimed, backstore still fetching -> PENDING STOCK
+    ("MACSO26-00142465",  9, 3, 7, None, None, "assigned"),
+    ("MACSO26-00142466",  4, 1, 3, None, None, "assigned"),
+    # at the counter, POS has not closed it -> trips the "awaiting complete" flag
+    ("MACSO26-00142461", 25, 2, 24, 12, None, "delivered"),
+    # completed normally
+    ("MACSO26-00142460", 40, 4, 39, 37, 35, "completed"),
+    ("MACSO26-00142458", 50, 1, 48, 45, 42, "completed"),
     # cancelled
-    ("MACSO26-00142450", 30, None, None, None, "cancelled", "Customer tukar fikiran"),
+    ("MACSO26-00142450", 30, None, None, None, None, "cancelled"),
 ]
 
-for i, (so, ago, pos, claim_ago, deliv_ago, status, reason) in enumerate(SEED, start=1):
+for i, (so, scan_ago, pos, claim_ago, deliv_ago, comp_ago, status) in enumerate(SEED, start=1):
     ref = "#%03d" % i
     claimed_by = by_code.get("pos%d" % pos) if pos else None
     claimed_at = ts(claim_ago) if claim_ago is not None else None
     delivered_at = ts(deliv_ago) if deliv_ago is not None else None
-    cancelled_at = (ts(deliv_ago if deliv_ago is not None else max(ago - 2, 1))
-                    if status == "cancelled" else None)
+    completed_at = ts(comp_ago) if comp_ago is not None else None
+    cancelled_at = ts(scan_ago - 2) if status == "cancelled" else None
 
     cur = conn.execute(
         """INSERT INTO so_requests
            (store_id, day_key, seq, ref_no, so_number, status,
             scanned_by, scanned_at, pos_number, claimed_by, claimed_at,
-            delivered_by, delivered_at, cancelled_by, cancelled_at, cancel_reason, note)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            delivered_by, delivered_at, completed_by, completed_at,
+            cancelled_by, cancelled_at, cancel_reason, note)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (store_id, day, i, ref, so, status,
-         scanner, ts(ago), pos, claimed_by, claimed_at,
+         scanner, ts(scan_ago), pos, claimed_by, claimed_at,
          backstore if delivered_at else None, delivered_at,
-         scanner if cancelled_at else None, cancelled_at, reason, None),
+         claimed_by if completed_at else None, completed_at,
+         scanner if cancelled_at else None, cancelled_at,
+         "Customer changed their mind" if status == "cancelled" else None, None),
     )
     rid = cur.lastrowid
-    ev = [("scanned", scanner, ts(ago))]
+
+    ev = [("scanned", scanner, ts(scan_ago))]
     if claimed_at:
         ev.append(("claimed", claimed_by, claimed_at))
     if delivered_at:
         ev.append(("delivered", backstore, delivered_at))
+    if completed_at:
+        ev.append(("completed", claimed_by, completed_at))
     if cancelled_at:
         ev.append(("cancelled", scanner, cancelled_at))
     for name, actor, at in ev:
@@ -77,13 +88,15 @@ for i, (so, ago, pos, claim_ago, deliv_ago, status, reason) in enumerate(SEED, s
             (rid, name, actor, at, None))
 
 conn.commit()
-print("Seeded day", day)
+
+print("Seeded", day)
 for r in conn.execute(
-    "SELECT ref_no, so_number, status, pos_number, scanned_at, delivered_at "
-    "FROM so_requests ORDER BY seq"
+    "SELECT ref_no, so_number, status, pos_number, scanned_at FROM so_requests ORDER BY seq"
 ):
     print("  %-5s %-20s %-10s POS=%-4s scan=%s" % (
         r["ref_no"], r["so_number"], r["status"], r["pos_number"] or "-", r["scanned_at"]))
-print("Roles:", [(r["code"], r["role"], r["pos_number"])
-                 for r in conn.execute("SELECT code, role, pos_number FROM staff ORDER BY id")])
+counts = {}
+for r in conn.execute("SELECT status, COUNT(*) c FROM so_requests GROUP BY status"):
+    counts[r["status"]] = r["c"]
+print("  stages:", counts)
 conn.close()

@@ -88,12 +88,23 @@ This single sheet is the whole training. Staff scan the QR, tap their role, done
 | Role | Their device | What they do |
 |---|---|---|
 | **SCANNER** | The QMS computer itself | Scan the customer's SO barcode |
-| **POS 1 – 4** | Any phone/tablet/POS screen on the wifi | Work the queue: claim an SO, complete it when the customer has it |
-| **BACKSTORE** | Any phone/tablet on the wifi | See "DELIVER TO POS 3", walk it over, tick it |
+| **POS 1 – 4** | Any phone/tablet/POS screen on the wifi | Claim an SO from the Queue, then mark it complete once the customer has the item |
+| **BACKSTORE** | Any phone/tablet on the wifi | See "DELIVER TO POS 3", walk it over, tick it delivered |
 
-**The queue is the list you call customers from.** An SO stays in it — claimed or
-not — until someone marks it complete. Use **COPY** on a card to copy the SO number
-if you need to read it out or paste it somewhere.
+**What a POS sees, in order:**
+
+1. **Queue** — SOs nobody has taken yet, oldest scan first
+2. **My SOs** — what this counter has claimed. The badge reads **PENDING STOCK**
+   while the backstore is fetching, then turns to **DELIVERED** once the item is
+   physically at the counter
+3. **Completed** — everything this counter has closed
+
+**The customer is called by SO number**, so My SOs stays in the order the SOs were
+scanned. Use **COPY** on a card to copy the SO number if you need to read it out or
+paste it somewhere.
+
+An SO stays in **My SOs** until it is marked complete — claiming it never makes it
+disappear from the system.
 
 ### ⚠️ The one thing that trips people up
 

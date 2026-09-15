@@ -9,8 +9,9 @@
   // Database statuses -> words a shop-floor operator recognises instantly.
   var STATUS_LABEL = {
     scanned: "WAITING",
-    assigned: "CLAIMED",
-    delivered: "DELIVERED",
+    assigned: "PENDING STOCK",   // POS has it, backstore has not brought the item
+    delivered: "DELIVERED",      // item is at the counter, POS must close it
+    completed: "COMPLETED",
     cancelled: "CANCELLED",
   };
 
@@ -18,9 +19,11 @@
     scanner: [{ k: "scan", i: "📷", t: "Scan" },
               { k: "mine", i: "📋", t: "My Scans" }],
     pos:     [{ k: "queue", i: "🎯", t: "Queue" },
-              { k: "mine", i: "📋", t: "My SOs" }],
+              { k: "mine", i: "📋", t: "My SOs" },
+              { k: "completed", i: "✅", t: "Completed" }],
     backstore: [{ k: "todeliver", i: "🚚", t: "To Deliver" },
-                { k: "done", i: "✅", t: "Completed" }],
+                { k: "atcounter", i: "📦", t: "At Counter" },
+                { k: "completed", i: "✅", t: "Completed" }],
     manager: [{ k: "today", i: "📋", t: "All" },
               { k: "stats", i: "📊", t: "Stats" },
               { k: "setup", i: "⚙", t: "Setup" }],
@@ -28,19 +31,21 @@
 
   var TITLES = {
     mine: "My Scans",
-    queue: "Live Queue",
+    queue: "Queue",
     unclaimed: "Unclaimed SOs",
     todeliver: "To Deliver to POS",
-    done: "Completed",
+    atcounter: "At Counter — waiting to be completed",
+    completed: "Completed",
     today: "All SOs Today",
   };
 
   var EMPTY = {
-    mine: "Nothing yet.<br>Scan a customer barcode to start.",
-    queue: "The queue is empty.<br>Every SO has been completed.",
+    mine: "Nothing claimed yet.<br>Pick an SO from the Queue.",
+    queue: "Nobody is waiting.<br>The queue is empty.",
     unclaimed: "No SOs waiting.<br>Every SO has been claimed.",
     todeliver: "Nothing to deliver.<br>All caught up.",
-    done: "No completed SOs yet today.",
+    atcounter: "Nothing sitting at a counter.",
+    completed: "Nothing completed yet today.",
     today: "No SOs today yet.",
   };
 
@@ -350,7 +355,8 @@
   // ------------------------------------------------------------ navigation
   var VIEW_OF_TAB = {
     scan: null, mine: "mine", queue: "queue", unclaimed: "unclaimed",
-    todeliver: "todeliver", done: "today", today: "today",
+    todeliver: "todeliver", atcounter: "atcounter", completed: "completed",
+    done: "today", today: "today",
     stats: null, setup: null,
   };
 
@@ -376,11 +382,12 @@
 
   function setBoardTitle(tab) {
     var t = TITLES[tab] || "Board";
-    if (tab === "mine" && state.staff.role === "pos") t = "My SOs";
-    if (tab === "queue" && state.staff.role === "pos") t = "Live Queue — POS " + state.staff.pos_number;
+    if (tab === "mine" && state.staff.role === "pos") t = "My SOs — POS " + state.staff.pos_number;
+    if (tab === "queue" && state.staff.role === "pos") t = "Queue — POS " + state.staff.pos_number;
     $("boardTitle").textContent = t;
-    var lbl = { mine: "Mine", queue: "In Queue", unclaimed: "Unclaimed",
-                todeliver: "To Deliver", done: "Completed", today: "Open" };
+    var lbl = { mine: "Mine", queue: "Waiting", unclaimed: "Unclaimed",
+                todeliver: "To Deliver", atcounter: "At Counter",
+                completed: "Completed", done: "Completed", today: "Open" };
     $("bOpenLbl").textContent = lbl[tab] || "Open";
   }
 
@@ -624,13 +631,12 @@
     try {
       var q = await api("GET", "/api/v1/requests?view=" + view);
       var rows = q.requests || [];
-      if (state.tab === "done") rows = rows.filter(function (r) { return r.status === "delivered"; });
 
-      $("bOpen").textContent = state.tab === "done" ? q.delivered_count
-        : state.tab === "mine" ? rows.filter(function (r) {
-            return r.status === "scanned" || r.status === "assigned"; }).length
-        : q.open_count;
-      $("bDone").textContent = q.delivered_count;
+      // headline = "how much is waiting on me right now"
+      $("bOpen").textContent = state.tab === "completed" ? q.completed_count
+        : state.tab === "today" ? q.open_count
+        : rows.length;
+      $("bDone").textContent = q.completed_count;
       $("bAttention").textContent = q.attention_count;
 
       if (q.attention_count > 0) {
@@ -641,7 +647,7 @@
       }
 
       var pend = rows.filter(function (r) {
-        return r.status !== "delivered" && r.status !== "cancelled";
+        return r.status === "scanned" || r.status === "assigned" || r.status === "delivered";
       }).length;
       if (state.staff.role === "pos") document.title = (pend ? pend + " SO — " : "") + "QMS P" + state.staff.pos_number;
       else if (state.staff.role === "backstore") document.title = (pend ? pend + " to deliver — " : "") + "QMS";
@@ -661,12 +667,13 @@
     }
 
     var sorted = rows.slice().sort(function (a, b) {
-      if (state.tab === "done" || state.tab === "today" || state.tab === "mine") {
-        return (b.seq || 0) - (a.seq || 0);
-      }
-      var ra = a.status === "scanned", rb = b.status === "scanned";
-      if (state.tab === "todeliver" && ra !== rb) return ra ? 1 : -1;  // claimed work first
-      return (a.seq || 0) - (b.seq || 0);                             // otherwise FIFO
+      // review-style lists read newest first
+      if (state.tab === "completed" || state.tab === "today") return (b.seq || 0) - (a.seq || 0);
+      if (state.tab === "mine" && state.staff.role !== "pos") return (b.seq || 0) - (a.seq || 0);
+      // Every working queue is ordered by SCAN time, oldest first. `seq` is the
+      // daily arrival counter, so the customer who arrived first is always at the
+      // top of My SOs too — not the one who happened to be claimed first.
+      return (a.seq || 0) - (b.seq || 0);
     });
 
     var t0 = Date.now();
@@ -685,10 +692,10 @@
   }
 
   function card(r, role) {
-    var open = r.status === "scanned" || r.status === "assigned";
+    var open = r.status === "scanned" || r.status === "assigned" || r.status === "delivered";
     var timeVal, timeCls;
     if (open) { timeVal = minsLabel(r.elapsed_minutes); timeCls = r.attention ? "over" : "ok"; }
-    else if (r.status === "delivered") { timeVal = "✓ " + minsLabel(r.total_minutes); timeCls = "dimmed"; }
+    else if (r.status === "completed") { timeVal = "✓ " + minsLabel(r.total_minutes); timeCls = "dimmed"; }
     else { timeVal = "cancelled"; timeCls = "dimmed"; }
 
     var meta = "Scanned " + fmtTime(r.scanned_at) + " · " + esc(r.scanned_by_name || "-");
@@ -699,15 +706,23 @@
     if (r.delivered_at) {
       meta += "<br>Delivered " + fmtTime(r.delivered_at) + " · " + esc(r.delivered_by_name || "-");
     }
+    if (r.completed_at) {
+      meta += "<br>Completed " + fmtTime(r.completed_at) + " · " + esc(r.completed_by_name || "-");
+    }
 
-    // the line the backstore actually reads
+    // the line that tells each role what happens next
     var dest = "";
-    if (r.pos_number) {
+    if (r.status === "completed") {
+      dest = '<div class="so-dest done">✓ COMPLETED' +
+             (r.pos_number ? " AT POS " + r.pos_number : "") + "</div>";
+    } else if (r.status === "delivered") {
+      dest = r.pos_number
+        ? '<div class="so-dest atcounter">→ ITEM AT POS ' + r.pos_number + " — MARK COMPLETE</div>"
+        : '<div class="so-dest none">→ delivered without a POS</div>';
+    } else if (r.status === "assigned") {
       dest = '<div class="so-dest">→ DELIVER TO POS ' + r.pos_number + "</div>";
     } else if (r.status === "scanned") {
-      dest = '<div class="so-dest none">→ no POS has claimed this yet</div>';
-    } else if (r.status === "delivered") {
-      dest = '<div class="so-dest none">→ delivered without a POS</div>';
+      dest = '<div class="so-dest none">→ waiting for a POS to claim</div>';
     }
 
     var attn = "";
@@ -733,11 +748,16 @@
         btns.push('<button class="btn btn-dark btn-big" data-act="deliver" data-id="' + r.id +
                   '">Mark Delivered (no POS)</button>');
       }
-      if (role === "pos" && r.status === "assigned" && r.pos_number === state.staff.pos_number) {
-        // Whoever actually finishes the handover closes the queue entry — waiting
-        // on the other role would leave a customer called but never cleared.
-        btns.push('<button class="btn btn-done" data-act="deliver" data-id="' + r.id +
+      if (role === "pos" && r.pos_number === state.staff.pos_number &&
+          (r.status === "assigned" || r.status === "delivered")) {
+        // Only the counter holding the item closes it: backstore said "handed
+        // over", POS confirms "customer has it". Big and green once the stock is
+        // physically at the counter, so the normal next action is obvious.
+        var primary = r.status === "delivered" ? "btn-done btn-big" : "btn-dark";
+        btns.push('<button class="btn ' + primary + '" data-act="complete" data-id="' + r.id +
                   '">MARK COMPLETE</button>');
+      }
+      if (role === "pos" && r.status === "assigned" && r.pos_number === state.staff.pos_number) {
         btns.push('<button class="btn btn-dark" data-act="release" data-id="' + r.id +
                   '">Release</button>');
       }
@@ -771,9 +791,14 @@
       buzz(60);
       if (what === "claim") { toast("Claimed for POS " + r.pos_number + " ✓", "ok"); beep(1000, 0.12); }
       else if (what === "deliver") {
-        var who = state.staff.role === "pos" ? "Marked complete ✓" : "Marked delivered ✓";
-        toast(r.warning ? "Delivered — " + r.warning : who, r.warning ? "warn" : "ok", 5000);
+        toast(r.warning ? "Delivered — " + r.warning
+                        : "Handed over — waiting for the POS to complete",
+              r.warning ? "warn" : "ok", 5000);
         beep(1000, 0.14);
+      }
+      else if (what === "complete") {
+        toast(r.ref_no + " completed ✓ — out of the queue", "ok", 4000);
+        beep(1100, 0.16);
       } else if (what === "release") toast("SO released back to the pool", "warn");
       else toast("Done", "ok");
       loadBoard();
@@ -798,11 +823,12 @@
 
       $("statsBody").innerHTML =
         box("Total SOs", s.total) +
-        box("Completed", s.delivered, "var(--ok)") +
-        box("Open", s.scanned + s.assigned, "var(--warn)") +
+        box("Completed", s.completed, "var(--ok)") +
+        box("Still open", s.scanned + s.assigned + s.delivered, "var(--warn)") +
         box("Attention", s.attention, "var(--bad)") +
         box("Avg wait for POS", s.avg_wait_pos + "m") +
-        box("Avg POS → delivered", s.avg_wait_deliver + "m") +
+        box("Avg POS → stock", s.avg_wait_stock + "m") +
+        box("Avg stock → complete", s.avg_wait_complete + "m") +
         box("Avg total", s.avg_total + "m") +
         box("Slowest", s.max_total + "m", "var(--bad)") +
         box("Within 5 min", s.under_5, "var(--ok)") +

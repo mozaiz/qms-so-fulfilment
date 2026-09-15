@@ -289,3 +289,11 @@ body{
 }
 .btn-copy:active{filter:brightness(.85)}
 .btn-copy.copied{background:#12351d;border-color:var(--ok);color:#56d364}
+
+/* ================= four-stage handover ================= */
+.badge.completed{background:#0d2a14;color:#3fb950}
+.so.completed{border-left-color:var(--ok);opacity:.75}
+
+/* delivered = the good news state: the item is physically at this counter */
+.so-dest.atcounter{color:var(--ok);font-size:17px;font-weight:800}
+.so-dest.done{color:var(--dim);font-size:15px}

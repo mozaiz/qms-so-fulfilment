@@ -37,8 +37,9 @@ TZ = ZoneInfo(os.environ.get("QMS_TZ", "Asia/Kuala_Lumpur"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("QMS_DB", os.path.join(BASE_DIR, "qms.db"))
 
-SLA_MINUTES = int(os.environ.get("QMS_SLA_MIN", "10"))    # claimed -> delivered
-STALE_MINUTES = int(os.environ.get("QMS_STALE_MIN", "15"))  # scanned -> not claimed
+SLA_MINUTES = int(os.environ.get("QMS_SLA_MIN", "10"))         # claimed -> delivered
+STALE_MINUTES = int(os.environ.get("QMS_STALE_MIN", "15"))      # scanned -> not claimed
+COMPLETE_MINUTES = int(os.environ.get("QMS_COMPLETE_MIN", "10"))  # at counter -> not completed
 DEDUPE_MINUTES = int(os.environ.get("QMS_DEDUPE_MIN", "5"))
 
 POS_COUNT = int(os.environ.get("QMS_POS_COUNT", "4"))
@@ -50,6 +51,10 @@ ROLE_POS = "pos"
 ROLE_BACKSTORE = "backstore"
 ROLE_MANAGER = "manager"
 ROLES = (ROLE_SCANNER, ROLE_POS, ROLE_BACKSTORE, ROLE_MANAGER)
+
+# Everything still in flight. 'delivered' means the item reached the counter and the
+# customer is being served, so it is STILL an open queue entry until the POS closes it.
+OPEN_STATUSES = ("scanned", "assigned", "delivered")
 
 # Real Machines SO barcode, e.g. MACSO26-00142463.
 # Soft validation only — a mismatch is flagged, never rejected, because other
@@ -145,6 +150,9 @@ CREATE TABLE IF NOT EXISTS so_requests (
     delivered_by INTEGER,
     delivered_at TEXT,
 
+    completed_by INTEGER,
+    completed_at TEXT,
+
     cancelled_by INTEGER,
     cancelled_at TEXT,
     cancel_reason TEXT,
@@ -178,6 +186,14 @@ CREATE INDEX IF NOT EXISTS idx_soevents_req ON so_events(request_id);
 
 def migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations — safe to run on every boot, on an existing database."""
+    # v0.5.0: handing an item over became two confirmations — the backstore marks
+    # it delivered at the counter, the POS closes it once the customer has it.
+    rcols = {r["name"] for r in conn.execute("PRAGMA table_info(so_requests)").fetchall()}
+    if "completed_by" not in rcols:
+        conn.execute("ALTER TABLE so_requests ADD COLUMN completed_by INTEGER")
+    if "completed_at" not in rcols:
+        conn.execute("ALTER TABLE so_requests ADD COLUMN completed_at TEXT")
+
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stores)").fetchall()}
     if "pos_count" not in cols:
         conn.execute("ALTER TABLE stores ADD COLUMN pos_count INTEGER NOT NULL DEFAULT 4")
@@ -264,33 +280,47 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.5.0", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:
+    """
+    Four stages, each timed separately so the store can see where the delay is:
+
+        scanned   -> claimed      -> delivered        -> completed
+        in queue     Pending Stock   backstore handed    POS closed it
+                                     it over
+    """
     d = dict(r)
     scanned = parse_dt(d.get("scanned_at"))
     claimed = parse_dt(d.get("claimed_at"))
     delivered = parse_dt(d.get("delivered_at"))
+    completed = parse_dt(d.get("completed_at"))
     status = d["status"]
 
     d["format_ok"] = so_format_ok(d.get("so_number"))
     d["wait_pos_minutes"] = mins_between(scanned, claimed)
-    d["wait_deliver_minutes"] = mins_between(claimed, delivered)
-    d["total_minutes"] = mins_between(scanned, delivered)
+    d["wait_stock_minutes"] = mins_between(claimed, delivered)
+    d["wait_complete_minutes"] = mins_between(delivered, completed)
+    # closed_at = whoever actually finished it off
+    closed = completed or delivered
+    d["total_minutes"] = mins_between(scanned, closed)
 
-    # live elapsed for whatever stage it is stuck in
+    # live elapsed for whatever stage it is currently stuck in
     if status == "scanned":
         d["elapsed_minutes"] = mins_between(scanned, now())
     elif status == "assigned":
         d["elapsed_minutes"] = mins_between(claimed, now())
+    elif status == "delivered":
+        d["elapsed_minutes"] = mins_between(delivered, now())
     else:
         d["elapsed_minutes"] = d["total_minutes"]
 
     # --- attention flags (shown red, never auto-actioned) ---
-    d["stale"] = False
+    d["stale"] = False          # nobody claimed it
+    d["sla_breach"] = False     # claimed but backstore is slow
+    d["await_complete"] = False # sitting at the counter, POS has not closed it
     d["no_pos_warning"] = False
-    d["sla_breach"] = False
     reasons = []
 
     if status == "scanned" and d["elapsed_minutes"] is not None:
@@ -301,6 +331,11 @@ def request_to_dict(r: sqlite3.Row) -> dict:
         if d["elapsed_minutes"] > SLA_MINUTES:
             d["sla_breach"] = True
             reasons.append(f"Backstore has not delivered ({int(d['elapsed_minutes'])} min)")
+    if status == "delivered" and d["elapsed_minutes"] is not None:
+        if d["elapsed_minutes"] > COMPLETE_MINUTES:
+            d["await_complete"] = True
+            reasons.append(f"At the counter, waiting for POS to complete "
+                           f"({int(d['elapsed_minutes'])} min)")
     if delivered and not d.get("pos_number"):
         d["no_pos_warning"] = True
         reasons.append("Delivered without a POS")
@@ -505,11 +540,13 @@ SELECT r.*,
        sc.name AS scanned_by_name,
        cb.name AS claimed_by_name,
        db.name AS delivered_by_name,
+       kb.name AS completed_by_name,
        xb.name AS cancelled_by_name
   FROM so_requests r
   LEFT JOIN staff sc ON r.scanned_by   = sc.id
   LEFT JOIN staff cb ON r.claimed_by   = cb.id
   LEFT JOIN staff db ON r.delivered_by = db.id
+  LEFT JOIN staff kb ON r.completed_by = kb.id
   LEFT JOIN staff xb ON r.cancelled_by = xb.id
 """
 
@@ -520,17 +557,19 @@ def fetch(conn, where: str, params: tuple, order: str, limit: int = 400):
 
 
 def _envelope(rows, day):
-    open_r = [r for r in rows if r["status"] in ("scanned", "assigned")]
-    delivered = [r for r in rows if r["status"] == "delivered"]
-    tot = [r["total_minutes"] for r in delivered if r["total_minutes"] is not None]
+    open_r = [r for r in rows if r["status"] in OPEN_STATUSES]
+    completed = [r for r in rows if r["status"] == "completed"]
+    tot = [r["total_minutes"] for r in completed if r["total_minutes"] is not None]
     return {
         "day": day,
         "sla_minutes": SLA_MINUTES,
         "stale_minutes": STALE_MINUTES,
+        "complete_minutes": COMPLETE_MINUTES,
         "requests": rows,
         "scanned_count": sum(1 for r in rows if r["status"] == "scanned"),
         "assigned_count": sum(1 for r in rows if r["status"] == "assigned"),
-        "delivered_count": len(delivered),
+        "delivered_count": sum(1 for r in rows if r["status"] == "delivered"),
+        "completed_count": len(completed),
         "cancelled_count": sum(1 for r in rows if r["status"] == "cancelled"),
         "open_count": len(open_r),
         "attention_count": sum(1 for r in rows if r["attention"]),
@@ -543,40 +582,54 @@ def _envelope(rows, day):
 def list_requests(view: str = Query("today"), me: dict = Depends(current_staff)):
     """
     view:
+      queue      — waiting for a POS to claim it        (POS queue tab)
+      mine       — pos: claimed by my counter, not yet closed
+                   scanner: everything I scanned
+      completed  — closed by my POS (or all, for other roles)
+      todeliver  — claimed, not yet walked to the counter (backstore tab)
+      atcounter  — delivered, POS has not closed it yet
       today      — everything for today (default; every role polls this)
       all        — everything, newest first
-      mine       — scanner: what I scanned / pos: what my POS claimed
-      queue      — every SO not yet completed, in arrival order (the live queue)
-      unclaimed  — status 'scanned', waiting for a POS to claim
-      todeliver  — assigned first, then anything still unclaimed (backstore screen)
+      unclaimed  — alias of queue, kept for compatibility
     """
     conn = get_db()
     try:
         day = today_key()
         sid = me["store_id"]
 
-        if view == "unclaimed":
+        if view in ("queue", "unclaimed"):
+            # waiting for a POS. Oldest scan first — this is the queue order.
             rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='scanned'",
                          (sid, day), "r.seq")
-        elif view == "queue":
-            # The live queue: every SO still awaiting completion, in the order it
-            # arrived. Claimed SOs stay in this list — staff call customers by SO
-            # number, so an SO must not vanish from the queue until it is done.
-            rows = fetch(conn,
-                         "r.store_id=? AND r.day_key=? AND r.status IN ('scanned','assigned')",
-                         (sid, day), "r.seq")
         elif view == "todeliver":
-            # assigned first (the real work), then SOs never claimed by any POS so
-            # backstore can still act on them (flagged with a warning, not blocked)
-            rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status IN ('assigned','scanned')",
-                         (sid, day), "CASE r.status WHEN 'assigned' THEN 0 ELSE 1 END, r.seq")
+            # backstore's work list: claimed, not yet at the counter
+            rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='assigned'",
+                         (sid, day), "r.seq")
+        elif view == "atcounter":
+            # handed over, POS has not closed it yet
+            rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='delivered'",
+                         (sid, day), "r.seq")
         elif view == "mine":
             if me["role"] == ROLE_POS:
-                rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.pos_number=?",
-                             (sid, day, me["pos_number"]), "r.seq DESC")
+                # MY SOs: claimed by this counter and not yet closed.
+                # ORDERED BY SCAN SEQUENCE, not claim time. It is a queue — the
+                # customer who arrived first is the one to serve first.
+                rows = fetch(conn,
+                             "r.store_id=? AND r.day_key=? AND r.pos_number=? "
+                             "AND r.status IN ('assigned','delivered')",
+                             (sid, day, me["pos_number"]), "r.seq")
             else:
                 rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.scanned_by=?",
                              (sid, day, me["id"]), "r.seq DESC")
+        elif view == "completed":
+            if me["role"] == ROLE_POS:
+                rows = fetch(conn,
+                             "r.store_id=? AND r.day_key=? AND r.pos_number=? "
+                             "AND r.status='completed'",
+                             (sid, day, me["pos_number"]), "r.seq DESC")
+            else:
+                rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='completed'",
+                             (sid, day), "r.seq DESC")
         elif view == "all":
             rows = fetch(conn, "r.store_id=?", (sid,), "r.id DESC")
         else:  # today
@@ -669,18 +722,17 @@ def release(rid: int, me: dict = Depends(current_staff)):
 @app.post("/api/v1/requests/{rid}/deliver")
 def deliver(rid: int, me: dict = Depends(current_staff)):
     """
-    Complete an SO. Normally the backstore ticks it as they hand the item over,
-    but the POS that claimed it can complete it too — whoever actually finishes
-    the handover should be able to close the queue entry, and waiting on the
-    other role would leave a customer called but never cleared.
+    Backstore hands the item over at the counter.
+
+    This is NOT the end of the queue entry any more: the card moves from
+    "Pending Stock" to "Delivered" on the POS screen and the POS still closes it
+    with /complete. Two confirmations, so the store knows the customer actually
+    received the goods.
     """
-    require_role(me, ROLE_BACKSTORE, ROLE_MANAGER, ROLE_POS)
+    require_role(me, ROLE_BACKSTORE, ROLE_MANAGER)
     conn = get_db()
     try:
         row = _get(conn, rid, me["store_id"])
-        if me["role"] == ROLE_POS and row["pos_number"] != me["pos_number"]:
-            owner = f"POS {row['pos_number']}" if row["pos_number"] else "no POS"
-            raise HTTPException(403, f"This SO belongs to {owner} — you cannot complete it")
         if row["status"] not in ("scanned", "assigned"):
             raise HTTPException(409, f"{row['ref_no']} is '{row['status']}' — cannot mark delivered")
 
@@ -698,6 +750,37 @@ def deliver(rid: int, me: dict = Depends(current_staff)):
         out = request_to_dict(_get(conn, rid, me["store_id"]))
         out["warning"] = warn
         return out
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/requests/{rid}/complete")
+def complete(rid: int, me: dict = Depends(current_staff)):
+    """
+    POS closes the entry once the customer has the item in hand. This is what
+    finally takes the SO out of the queue.
+
+    The counter that claimed it is the one that closes it — they are the only
+    people who can see whether the customer walked away with the goods.
+    """
+    require_role(me, ROLE_POS, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        row = _get(conn, rid, me["store_id"])
+        if me["role"] == ROLE_POS and row["pos_number"] != me["pos_number"]:
+            owner = f"POS {row['pos_number']}" if row["pos_number"] else "no POS"
+            raise HTTPException(403, f"This SO belongs to {owner} — you cannot complete it")
+        if row["status"] not in ("assigned", "delivered"):
+            raise HTTPException(409, f"{row['ref_no']} is '{row['status']}' — cannot complete")
+
+        conn.execute(
+            "UPDATE so_requests SET status='completed', completed_by=?, completed_at=? WHERE id=?",
+            (me["id"], iso(now()), rid),
+        )
+        log_event(conn, rid, "completed", me["id"],
+                  {"at_counter": row["status"] == "delivered"})
+        conn.commit()
+        return request_to_dict(_get(conn, rid, me["store_id"]))
     finally:
         conn.close()
 
@@ -751,19 +834,19 @@ def stats_today(me: dict = Depends(current_staff)):
     try:
         day = today_key()
         rows = fetch(conn, "r.store_id=? AND r.day_key=?", (me["store_id"], day), "r.seq")
-        delivered = [r for r in rows if r["status"] == "delivered"]
+        completed = [r for r in rows if r["status"] == "completed"]
 
         def avg(key):
-            vals = [r[key] for r in delivered if r.get(key) is not None]
+            vals = [r[key] for r in completed if r.get(key) is not None]
             return round(sum(vals) / len(vals), 1) if vals else 0
 
         def worst(key):
-            vals = [r[key] for r in delivered if r.get(key) is not None]
+            vals = [r[key] for r in completed if r.get(key) is not None]
             return round(max(vals), 1) if vals else 0
 
         by_pos: dict[str, int] = {}
         for r in rows:
-            if r["status"] in ("assigned", "delivered") and r["pos_number"]:
+            if r["status"] in ("assigned", "delivered", "completed") and r["pos_number"]:
                 k = "POS %d" % r["pos_number"]
                 by_pos[k] = by_pos.get(k, 0) + 1
 
@@ -777,15 +860,17 @@ def stats_today(me: dict = Depends(current_staff)):
             "total": len(rows),
             "scanned": sum(1 for r in rows if r["status"] == "scanned"),
             "assigned": sum(1 for r in rows if r["status"] == "assigned"),
-            "delivered": len(delivered),
+            "delivered": sum(1 for r in rows if r["status"] == "delivered"),
+            "completed": len(completed),
             "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
             "avg_wait_pos": avg("wait_pos_minutes"),
-            "avg_wait_deliver": avg("wait_deliver_minutes"),
+            "avg_wait_stock": avg("wait_stock_minutes"),
+            "avg_wait_complete": avg("wait_complete_minutes"),
             "avg_total": avg("total_minutes"),
             "max_total": worst("total_minutes"),
-            "under_5": sum(1 for r in delivered
+            "under_5": sum(1 for r in completed
                            if r["total_minutes"] is not None and r["total_minutes"] <= 5),
-            "over_sla": sum(1 for r in delivered
+            "over_sla": sum(1 for r in completed
                             if r["total_minutes"] is not None and r["total_minutes"] > SLA_MINUTES),
             "no_pos_delivered": sum(1 for r in rows if r["no_pos_warning"]),
             "attention": sum(1 for r in rows if r["attention"]),
@@ -806,7 +891,8 @@ def export_csv(me: dict = Depends(current_staff)):
         w = csv.writer(buf)
         w.writerow(["REF", "SO_NUMBER", "STATUS", "POS", "SCANNED_AT", "SCANNED_BY",
                     "CLAIMED_AT", "POS_CLAIMED_BY", "DELIVERED_AT", "DELIVERED_BY",
-                    "WAIT_POS_MIN", "WAIT_DELIVER_MIN", "TOTAL_MIN",
+                    "COMPLETED_AT", "COMPLETED_BY",
+                    "WAIT_POS_MIN", "WAIT_STOCK_MIN", "WAIT_COMPLETE_MIN", "TOTAL_MIN",
                     "CANCELLED_AT", "REASON", "NOTE"])
         for r in rows:
             w.writerow([
@@ -814,8 +900,10 @@ def export_csv(me: dict = Depends(current_staff)):
                 r["scanned_at"], r["scanned_by_name"] or "",
                 r["claimed_at"] or "", r["claimed_by_name"] or "",
                 r["delivered_at"] or "", r["delivered_by_name"] or "",
+                r["completed_at"] or "", r["completed_by_name"] or "",
                 r["wait_pos_minutes"] if r["wait_pos_minutes"] is not None else "",
-                r["wait_deliver_minutes"] if r["wait_deliver_minutes"] is not None else "",
+                r["wait_stock_minutes"] if r["wait_stock_minutes"] is not None else "",
+                r["wait_complete_minutes"] if r["wait_complete_minutes"] is not None else "",
                 r["total_minutes"] if r["total_minutes"] is not None else "",
                 r["cancelled_at"] or "", r["cancel_reason"] or "", r["note"] or "",
             ])
@@ -1050,8 +1138,11 @@ def health():
         conn.close()
     return {
         "ok": True, "time": iso(now()), "tz": str(TZ), "store": STORE_CODE,
-        "requests_total": n, "sla_minutes": SLA_MINUTES,
-        "stale_minutes": STALE_MINUTES, "pos_count": n_pos,
+        "requests_total": n,
+        "stale_minutes": STALE_MINUTES,        # scanned -> nobody claimed it
+        "sla_minutes": SLA_MINUTES,            # claimed -> not yet delivered
+        "complete_minutes": COMPLETE_MINUTES,  # at counter -> POS has not closed it
+        "pos_count": n_pos,
         "version": app.version,
     }
 

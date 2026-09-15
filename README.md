@@ -5,12 +5,24 @@ at the front, the backstore picks the item and walks it to the right POS counter
 and everyone can see where it is at any moment.
 
 ```
-SCANNER                 P1 · P2 · P3 · P4                BACKSTORE
-scan barcode SO         tap the SO to claim it            sees "DELIVER TO POS 3"
-MACSO26-00142463        (status: assigned)                picks it, walks it, ticks ✓
-   │                          │                              (status: delivered)
-   └──► enters the list ──────┘
+SCANNER              P1 · P2 · P3 · P4                  BACKSTORE
+scan barcode SO      claim it to their counter           walks it to that counter
+MACSO26-00142463     -> PENDING STOCK                    -> marks it DELIVERED
+   │                       │                                  │
+   └──► Queue ─────────────┘                                  │
+        (oldest scan first)                                   │
+                     POS marks COMPLETE ◄─────────────────────┘
+                     -> Completed, out of the queue
 ```
+
+Four stages, each timed separately, so the store can see exactly where a delay is:
+
+| Stage | On the screen | Who moves it on |
+|---|---|---|
+| `scanned` | **WAITING** — in the Queue | a POS claims it |
+| `assigned` | **PENDING STOCK** — in My SOs | backstore delivers |
+| `delivered` | **DELIVERED** — in My SOs, at the counter | the POS completes it |
+| `completed` | **COMPLETED** | — it has left the queue |
 
 Runs on **one small computer inside the store**. Every device in that store just
 opens a web address. No cloud account, no subscription, **no data leaves the
@@ -149,9 +161,20 @@ the daily flow.
 | Role | Tabs | Can do |
 |---|---|---|
 | **Scanner** | Scan · My Scans | Scan SOs, see what they scanned, cancel their own |
-| **P1–P4** | Queue · My SOs | Work the live queue: claim an SO, complete it, release it |
-| **Backstore** | To Deliver · Completed | Deliver to the POS, tick it off, see stats, export |
+| **P1–P4** | Queue · My SOs · Completed | Claim an SO, watch for DELIVERED, mark it complete |
+| **Backstore** | To Deliver · At Counter · Completed | Deliver to the POS, see what is still open, export |
 | **Manager** | All · Stats · Setup | Everything, plus POS counters |
+
+### Claiming moves an SO from Queue to My SOs
+
+The Queue holds only what nobody has taken yet. The moment a POS claims an SO it
+leaves the shared Queue and appears in **that counter's My SOs**, where it stays
+through both remaining stages — `PENDING STOCK` while the backstore is fetching,
+`DELIVERED` once the item is physically at the counter.
+
+**My SOs is ordered by scan time, not claim time.** This is a queue: the customer
+who arrived first is served first, so claiming out of order must not reshuffle
+anything. `seq` is the daily arrival counter, which is what makes that exact.
 
 Roles are enforced **server-side** — a POS calling the scan endpoint gets `403`,
 a scanner reading stats gets `403`.
@@ -171,31 +194,34 @@ deactivated rather than deleted, so the audit trail survives.
 
 Shown to staff as **WAITING / CLAIMED / DELIVERED / CANCELLED**.
 
-### An SO does not leave the queue until it is complete
+### Nothing leaves the queue until the POS closes it
 
 Customers are called out by SO number, so the queue has to be the honest list of
-who is still waiting. The **Queue** view therefore holds *every* SO that has not
-been completed — claimed ones included, just badged with the POS that has it. An SO
-disappears the moment it is completed, and not before.
+who is still waiting. An SO disappears from it only on `completed`.
 
-Nothing is ever deleted. Every view is a filter over the same rows, so "the SO
-vanished" can only ever mean "someone completed it".
+Nothing is ever deleted — every view is a filter over the same rows. "The SO
+vanished" can therefore only ever mean "someone completed it", which is what makes
+it trustworthy when a customer argues.
 
-### Who can complete an SO
+### Who can do what
 
-Normally the backstore ticks it off as they hand the item over. **The POS that
-claimed it can complete it too** — whoever actually finishes the handover closes
-the entry, because waiting on the other role would leave a customer called but
-never cleared. The database still enforces the boundary:
+Two confirmations at handover, so the store knows the customer actually received
+the goods: the **backstore** says "walked it over", the **POS** says "customer has
+it". The boundary is enforced in the database, not just by hiding buttons:
 
-- the owning POS → allowed
-- a different POS → `403`
-- an SO no POS ever claimed → `403` for a POS (backstore may still deliver it)
+- the **owning** POS → may complete
+- a **different** POS → `403`
+- an SO **no POS ever claimed** → `403` for a POS, backstore may still deliver it (flagged)
+- the backstore → may deliver, may **not** complete
 
 Three things turn a card **red** — flagged, never auto-actioned:
 
 - **Stale** — scanned but no POS claimed it within `QMS_STALE_MIN` (15 min)
 - **Over SLA** — claimed but backstore has not delivered within `QMS_SLA_MIN` (10 min)
+- **Awaiting completion** — sitting at the counter and the POS has not closed it
+  within `QMS_COMPLETE_MIN` (10 min). This is the one that matters most: the
+  customer has their goods but nobody pressed the button, so the queue looks longer
+  than it is.
 - **Delivered without a POS** — allowed, but marked
 
 Nothing is ever auto-cancelled. Someone on the floor decides.
@@ -220,6 +246,7 @@ Everything lives in `qms.env` (see `qms.env.example`).
 | `QMS_MAX_POS` | `20` | Ceiling for the Add POS button |
 | `QMS_STALE_MIN` | `15` | Scanned-but-unclaimed turns red |
 | `QMS_SLA_MIN` | `10` | Claimed-but-undelivered turns red |
+| `QMS_COMPLETE_MIN` | `10` | At-the-counter-but-not-completed turns red |
 | `QMS_DEDUPE_MIN` | `5` | Ignore a repeat scan within this window |
 | `QMS_TZ` | `Asia/Kuala_Lumpur` | Timezone |
 
@@ -232,10 +259,11 @@ POST   /api/login                     {role, pos_number?}
 POST   /api/logout
 GET    /api/me
 POST   /api/v1/requests/scan          {so_number, note?}   scanner, manager
-GET    /api/v1/requests?view=today|all|mine|queue|unclaimed|todeliver
+GET    /api/v1/requests?view=queue|mine|completed|todeliver|atcounter|today|all
 POST   /api/v1/requests/{id}/claim    atomic compare-and-swap   pos, manager
 POST   /api/v1/requests/{id}/release  undo a claim              pos, manager
-POST   /api/v1/requests/{id}/deliver  complete the handover     backstore, manager, owning pos
+POST   /api/v1/requests/{id}/deliver  hand the item over       backstore, manager
+POST   /api/v1/requests/{id}/complete close the entry          owning pos, manager
 POST   /api/v1/requests/{id}/cancel   {reason?}                 scanner, manager
 GET    /api/v1/requests/{id}/events   audit trail
 GET    /api/v1/stats/today

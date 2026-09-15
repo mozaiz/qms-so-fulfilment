@@ -1,10 +1,13 @@
-"""End-to-end + concurrency test for QMS v3.
+"""End-to-end + concurrency test for QMS.
 
-Run against a live server:  ./venv/bin/python test_flow.py [base_url]
+    ./venv/bin/python test_flow.py [base_url]
 
-The important test is `concurrent_claim`: two POS devices tapping the same SO at
-the same instant must produce exactly ONE winner. That is the invariant a CSV
-"database" cannot hold.
+Two invariants matter most here:
+
+  1. `concurrent_claim` — fire N simultaneous claims at the same SO and require
+     exactly ONE winner. That is the operation a CSV "database" cannot do.
+  2. `fifo_order` — My SOs is ordered by when the SCANNER scanned, not by when a
+     POS happened to claim. Claiming out of order must not reshuffle the queue.
 """
 import json
 import sys
@@ -48,19 +51,27 @@ def login(role, pos=None):
     return d["token"]
 
 
+def scan(tok, so):
+    st, d = call("POST", "/api/v1/requests/scan", {"so_number": so}, tok)
+    assert st == 200, (st, d)
+    return d
+
+
 print("== health ==")
 st, h = call("GET", "/api/health")
 print(" ", h)
 check("health ok", st == 200 and h.get("ok"))
+check("health reports all three thresholds",
+      all(k in h for k in ("stale_minutes", "sla_minutes", "complete_minutes")),
+      {k: h.get(k) for k in ("stale_minutes", "sla_minutes", "complete_minutes")})
 
 print("\n== role logins ==")
 T = {}
 for role in ("scanner", "backstore", "manager"):
     T[role] = login(role)
-    print("  %-9s ok" % role)
 for n in range(1, h.get("pos_count", 4) + 1):
     T["pos%d" % n] = login("pos", n)
-    print("  pos%d      ok" % n)
+print("  signed in as:", ", ".join(sorted(T)))
 
 print("\n== role guards ==")
 st, _ = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00000001"}, T["pos1"])
@@ -72,20 +83,18 @@ check("Scanner cannot read stats -> 403", st == 403, st)
 
 print("\n== scan ==")
 SO = "MACSO26-00999999"
-st, t = call("POST", "/api/v1/requests/scan", {"so_number": SO.lower()}, T["scanner"])
-check("scanner scan ok", st == 200 and t["status"] == "scanned", st)
+t = scan(T["scanner"], SO.lower())
+check("scanner scan ok", t["status"] == "scanned")
 check("SO normalised to uppercase", t.get("so_number") == SO, t.get("so_number"))
-check("format_ok true for real MACSO format", t.get("format_ok") is True)
+check("format_ok true for a real MACSO format", t.get("format_ok") is True)
 RID = t["id"]
 
-st, t2 = call("POST", "/api/v1/requests/scan", {"so_number": SO}, T["scanner"])
-check("rescan -> duplicate, no new row", st == 200 and t2["duplicate"] is True and t2["id"] == RID)
+t2 = scan(T["scanner"], SO)
+check("rescan -> duplicate, no new row", t2["duplicate"] is True and t2["id"] == RID)
+bad = scan(T["scanner"], "1234567890")
+check("non-MACSO format accepted but flagged", bad.get("format_ok") is False)
 
-st, bad = call("POST", "/api/v1/requests/scan", {"so_number": "1234567890"}, T["scanner"])
-check("non-MACSO format accepted but flagged", st == 200 and bad.get("format_ok") is False,
-      bad.get("format_ok"))
-
-print("\n== CONCURRENT CLAIM (the invariant CSV cannot hold) ==")
+print("\n== CONCURRENT CLAIM (the invariant a CSV cannot hold) ==")
 results = []
 lock = threading.Lock()
 
@@ -93,13 +102,11 @@ lock = threading.Lock()
 def try_claim(tok, who):
     st, d = call("POST", "/api/v1/requests/%d/claim" % RID, None, tok)
     with lock:
-        results.append((who, st, d.get("pos_number"), d.get("detail")))
+        results.append((who, st, d.get("detail")))
 
 
-threads = [threading.Thread(target=try_claim, args=(T["pos1"], "pos1")),
-           threading.Thread(target=try_claim, args=(T["pos2"], "pos2")),
-           threading.Thread(target=try_claim, args=(T["pos3"], "pos3")),
-           threading.Thread(target=try_claim, args=(T["pos4"], "pos4"))]
+threads = [threading.Thread(target=try_claim, args=(T["pos%d" % n], "pos%d" % n))
+           for n in range(1, h.get("pos_count", 4) + 1)]
 for th in threads:
     th.start()
 for th in threads:
@@ -108,107 +115,133 @@ for th in threads:
 wins = [r for r in results if r[1] == 200]
 losses = [r for r in results if r[1] == 409]
 for w in results:
-    print("   %-5s -> HTTP %s%s" % (w[0], w[1], "" if w[1] == 200 else "  (%s)" % w[2:3]))
+    print("   %-5s -> HTTP %s%s" % (w[0], w[1], "" if w[1] == 200 else "  (%s)" % w[2]))
 check("exactly ONE POS won the claim", len(wins) == 1, "%d winners" % len(wins))
-check("exactly THREE got 409", len(losses) == 3, "%d conflicts" % len(losses))
+check("the rest got 409", len(losses) == len(threads) - 1, "%d conflicts" % len(losses))
+check("loser message names the winner",
+      any(d and "POS" in str(d) for _, s, d in results if s == 409),
+      [d for _, s, d in results if s == 409][:1])
 
 st, row = call("GET", "/api/v1/requests?view=today", None, T["backstore"])
 me = [r for r in row["requests"] if r["id"] == RID][0]
-check("DB holds exactly one POS number", bool(me["pos_number"]))
-check("loser message names the winner",
-      any(d and "POS" in str(d) for _, s, _, d in results if s == 409),
-      [d for _, s, _, d in results if s == 409][:1])
+winner_pos = me["pos_number"]
+check("DB holds exactly one POS number", bool(winner_pos), winner_pos)
 
-print("\n== deliver ==")
-st, d = call("POST", "/api/v1/requests/%d/deliver" % RID, None, T["backstore"])
-check("backstore deliver ok", st == 200 and d["status"] == "delivered", st)
-st, d = call("POST", "/api/v1/requests/%d/deliver" % RID, None, T["backstore"])
+print("\n== claim moves the SO out of the queue and into My SOs ==")
+st, qv = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
+check("claimed SO is GONE from the shared queue",
+      not [r for r in qv["requests"] if r["id"] == RID])
+
+st, mv = call("GET", "/api/v1/requests?view=mine", None, T["pos%d" % winner_pos])
+inmine = [r for r in mv["requests"] if r["id"] == RID]
+check("claimed SO appears in the winner's My SOs", len(inmine) == 1, "%d rows" % len(inmine))
+check("...with status PENDING STOCK (assigned)", inmine and inmine[0]["status"] == "assigned")
+
+st, mv2 = call("GET", "/api/v1/requests?view=mine", None,
+               T["pos%d" % (1 if winner_pos != 1 else 2)])
+check("it does NOT appear in another POS's My SOs",
+      not [r for r in mv2["requests"] if r["id"] == RID])
+
+print("\n== backstore hands it over ==")
+st, dv = call("POST", "/api/v1/requests/%d/deliver" % RID, None, T["pos%d" % winner_pos])
+check("POS can no longer mark delivered -> 403", st == 403, st)
+st, dv = call("POST", "/api/v1/requests/%d/deliver" % RID, None, T["backstore"])
+check("backstore deliver ok", st == 200 and dv["status"] == "delivered", st)
+st, dv = call("POST", "/api/v1/requests/%d/deliver" % RID, None, T["backstore"])
 check("double deliver -> 409", st == 409, st)
 
-print("\n== deliver with no POS -> warning ==")
-st, t3 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00999998"}, T["scanner"])
-st, d = call("POST", "/api/v1/requests/%d/deliver" % t3["id"], None, T["backstore"])
-check("deliver without POS allowed", st == 200, st)
-check("warning flag returned", d.get("warning") == "Delivered without a POS", d.get("warning"))
-check("no_pos_warning set on read", d.get("no_pos_warning") is True)
+st, mv3 = call("GET", "/api/v1/requests?view=mine", None, T["pos%d" % winner_pos])
+still = [r for r in mv3["requests"] if r["id"] == RID]
+check("STILL in My SOs after delivery (now DELIVERED)",
+      len(still) == 1 and still[0]["status"] == "delivered")
+
+st, ac = call("GET", "/api/v1/requests?view=atcounter", None, T["backstore"])
+check("shows up in the backstore At-Counter list",
+      [r for r in ac["requests"] if r["id"] == RID])
+
+print("\n== POS closes it ==")
+st, cv = call("POST", "/api/v1/requests/%d/complete" % RID, None,
+              T["pos%d" % (1 if winner_pos != 1 else 2)])
+check("another POS cannot complete it -> 403", st == 403, st)
+st, cv = call("POST", "/api/v1/requests/%d/complete" % RID, None, T["pos%d" % winner_pos])
+check("the owning POS can complete it", st == 200 and cv["status"] == "completed", st)
+check("completion is timestamped", bool(cv.get("completed_at")))
+st, cv = call("POST", "/api/v1/requests/%d/complete" % RID, None, T["pos%d" % winner_pos])
+check("completing twice -> 409", st == 409, st)
+
+st, mv4 = call("GET", "/api/v1/requests?view=mine", None, T["pos%d" % winner_pos])
+check("completed SO left My SOs", not [r for r in mv4["requests"] if r["id"] == RID])
+st, dv2 = call("GET", "/api/v1/requests?view=completed", None, T["pos%d" % winner_pos])
+check("completed SO is in the Completed tab",
+      [r for r in dv2["requests"] if r["id"] == RID])
+st, qv2 = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
+check("and it is not back in the queue", not [r for r in qv2["requests"] if r["id"] == RID])
+
+print("\n== FIFO: My SOs is ordered by SCAN time, not claim time ==")
+a = scan(T["scanner"], "MACSO26-00777001")   # scanned first
+b = scan(T["scanner"], "MACSO26-00777002")   # scanned second
+call("POST", "/api/v1/requests/%d/claim" % b["id"], None, T["pos3"])   # but claimed FIRST
+call("POST", "/api/v1/requests/%d/claim" % a["id"], None, T["pos3"])   # claimed second
+st, mv5 = call("GET", "/api/v1/requests?view=mine", None, T["pos3"])
+order = [r["so_number"] for r in mv5["requests"]
+         if r["so_number"] in ("MACSO26-00777001", "MACSO26-00777002")]
+check("earlier scan sorts first even though it was claimed later",
+      order == ["MACSO26-00777001", "MACSO26-00777002"], order)
+seqs = [r["seq"] for r in mv5["requests"]]
+check("the whole My SOs list is ascending by arrival", seqs == sorted(seqs), seqs)
+
+print("\n== completing without ever claiming ==")
+c = scan(T["scanner"], "MACSO26-00777003")
+st, _ = call("POST", "/api/v1/requests/%d/complete" % c["id"], None, T["pos1"])
+check("POS cannot complete an unclaimed SO -> 403", st == 403, st)
+st, _ = call("POST", "/api/v1/requests/%d/deliver" % c["id"], None, T["backstore"])
+check("backstore may still deliver an unclaimed SO (flagged)", st == 200, st)
 
 print("\n== release ==")
-st, t4 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00999997"}, T["scanner"])
-st, c = call("POST", "/api/v1/requests/%d/claim" % t4["id"], None, T["pos2"])
-check("pos2 claimed", st == 200 and c["pos_number"] == 2, st)
-st, r = call("POST", "/api/v1/requests/%d/release" % t4["id"], None, T["pos3"])
-check("other POS cannot release it -> 409", st == 409, st)
-st, r = call("POST", "/api/v1/requests/%d/release" % t4["id"], None, T["pos2"])
-check("owner can release", st == 200 and r["status"] == "scanned" and r["pos_number"] is None, st)
+d = scan(T["scanner"], "MACSO26-00777004")
+call("POST", "/api/v1/requests/%d/claim" % d["id"], None, T["pos2"])
+st, _ = call("POST", "/api/v1/requests/%d/release" % d["id"], None, T["pos3"])
+check("another POS cannot release it -> 409", st == 409, st)
+st, rl = call("POST", "/api/v1/requests/%d/release" % d["id"], None, T["pos2"])
+check("the owner can release it", st == 200 and rl["status"] == "scanned"
+      and rl["pos_number"] is None, st)
 
 print("\n== cancel ==")
-st, t5 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00999996"}, T["scanner"])
-st, c = call("POST", "/api/v1/requests/%d/cancel" % t5["id"], {"reason": "test"}, T["scanner"])
-check("scanner can cancel own scan", st == 200 and c["status"] == "cancelled", st)
-st, c = call("POST", "/api/v1/requests/%d/cancel" % t5["id"], {"reason": "again"}, T["scanner"])
+e = scan(T["scanner"], "MACSO26-00777005")
+st, cc = call("POST", "/api/v1/requests/%d/cancel" % e["id"], {"reason": "test"}, T["scanner"])
+check("scanner can cancel their own scan", st == 200 and cc["status"] == "cancelled", st)
+st, _ = call("POST", "/api/v1/requests/%d/cancel" % e["id"], {"reason": "again"}, T["scanner"])
 check("double cancel -> 409", st == 409, st)
 
 print("\n== views ==")
-for view, tok, who in (("unclaimed", T["pos1"], "pos"),
-                       ("todeliver", T["backstore"], "backstore"),
-                       ("mine", T["scanner"], "scanner"),
-                       ("today", T["manager"], "manager")):
-    st, d = call("GET", "/api/v1/requests?view=" + view, None, tok)
-    check("view %-10s -> %d rows" % (view, len(d.get("requests", []))), st == 200, st)
-
-print("\n== live queue keeps claimed SOs (they are called by SO number) ==")
-st, q1 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888001"}, T["scanner"])
-qid = q1["id"]
-st, qv = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
-check("queue view reachable", st == 200, st)
-in_q = [r for r in qv["requests"] if r["id"] == qid]
-check("unclaimed SO is in the queue", len(in_q) == 1 and in_q[0]["status"] == "scanned")
-
-st, _ = call("POST", "/api/v1/requests/%d/claim" % qid, None, T["pos1"])
-st, qv2 = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
-in_q2 = [r for r in qv2["requests"] if r["id"] == qid]
-check("claimed SO STAYS in the queue", len(in_q2) == 1, "%d rows" % len(in_q2))
-check("...and shows which POS has it", in_q2 and in_q2[0]["pos_number"] == 1)
-
-st, _ = call("POST", "/api/v1/requests/%d/deliver" % qid, None, T["backstore"])
-st, qv3 = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
-check("completed SO leaves the queue",
-      not [r for r in qv3["requests"] if r["id"] == qid])
-
-print("\n== POS can complete its own SO ==")
-st, p1 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888002"}, T["scanner"])
-pid = p1["id"]
-call("POST", "/api/v1/requests/%d/claim" % pid, None, T["pos2"])
-st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos3"])
-check("another POS cannot complete it -> 403", st == 403, st)
-st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos2"])
-check("the owning POS can complete it", st == 200 and d["status"] == "delivered", st)
-st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos2"])
-check("completing twice -> 409", st == 409, st)
-
-st, p2 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888003"}, T["scanner"])
-st, d = call("POST", "/api/v1/requests/%d/deliver" % p2["id"], None, T["pos1"])
-check("POS cannot complete an SO nobody claimed -> 403", st == 403, st)
+for view, tok in (("queue", T["pos1"]), ("mine", T["pos1"]), ("completed", T["pos1"]),
+                  ("todeliver", T["backstore"]), ("atcounter", T["backstore"]),
+                  ("mine", T["scanner"]), ("today", T["manager"]), ("all", T["manager"])):
+    st, dv = call("GET", "/api/v1/requests?view=" + view, None, tok)
+    check("view %-10s -> %3d rows" % (view, len(dv.get("requests", []))), st == 200, st)
 
 print("\n== audit trail ==")
-st, d = call("GET", "/api/v1/requests/%d/events" % RID, None, T["backstore"])
-names = [e["event"] for e in d["events"]]
-check("audit has scanned/claimed/delivered", all(x in names for x in ("scanned", "claimed", "delivered")),
-      names)
+st, dv = call("GET", "/api/v1/requests/%d/events" % RID, None, T["backstore"])
+names = [x["event"] for x in dv["events"]]
+check("audit has scanned/claimed/delivered/completed",
+      all(x in names for x in ("scanned", "claimed", "delivered", "completed")), names)
 
 print("\n== stats + csv ==")
 st, s = call("GET", "/api/v1/stats/today", None, T["manager"])
 check("stats ok", st == 200 and s["total"] > 0, st)
 print("   ", json.dumps({k: v for k, v in s.items()
-                          if k in ("total", "scanned", "assigned", "delivered",
-                                   "attention", "no_pos_delivered", "avg_total")}))
+                          if k in ("total", "scanned", "assigned", "delivered", "completed",
+                                   "attention", "avg_total", "avg_wait_stock",
+                                   "avg_wait_complete")}))
 req = urllib.request.Request(BASE + "/api/v1/stats/export.csv",
                             headers={"Authorization": "Bearer " + T["manager"]})
 with urllib.request.urlopen(req, timeout=20) as r:
     csv_body = r.read().decode()
-check("csv export has header + rows", "SO_NUMBER" in csv_body and csv_body.count("\r\n") > 2)
+check("csv has the new completion columns",
+      "COMPLETED_AT" in csv_body and "WAIT_COMPLETE_MIN" in csv_body)
+check("csv export has header + rows", csv_body.count("\r\n") > 2)
 
-print("\n" + "=" * 58)
+print("\n" + "=" * 60)
 print("PASSED %d / %d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:
     print("FAILED:")

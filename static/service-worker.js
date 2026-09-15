@@ -1,5 +1,5 @@
 /* QMS service worker — cache static, network-first for API */
-const CACHE = "qms-v8";
+const CACHE = "qms-v9";
 const STATIC = [
   "/",
   "/index.html",

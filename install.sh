@@ -638,6 +638,28 @@ cd "$APP_DIR"
 ./venv/bin/pip install --quiet -r requirements.txt
 ok "packages installed into $APP_DIR/venv"
 
+# Import the app BEFORE declaring success.
+#
+# This is the check that was missing. The interpreter found above was a good
+# Python 3.9 — and the app still could not start, because `int | None` in a
+# Pydantic model is evaluated at runtime and is invalid on 3.9. Everything up to
+# here passed, the summary printed, and the store was left with a server that
+# died on import with a TypeError naming neither the file nor the reason.
+#
+# A dependency-install check proves nothing about whether the code RUNS.
+say "Verifying the install"
+_import_err="$APP_DIR/import-check.err"
+if ./venv/bin/python -c "import app; assert app.app" 2>"$_import_err"; then
+  rm -f "$_import_err"
+  ok "the app imports cleanly on $(./venv/bin/python -V 2>&1)"
+else
+  bad "this build of QMS cannot start on this Python"
+  printf '\n'
+  tail -20 "$_import_err" | sed 's/^/        /'
+  printf '\n    Full traceback: %s\n' "$_import_err"
+  die "Refusing to install a version of QMS that cannot start."
+fi
+
 # ---------------------------------------------------------------- 4. config
 if [ ! -f "$APP_DIR/qms.env" ]; then
   cat > "$APP_DIR/qms.env" <<ENV

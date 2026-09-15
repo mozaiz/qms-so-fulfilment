@@ -514,6 +514,18 @@ space**, because macOS home directories often do.
   fallback look broken when it works fine under a real tap. Drive it with a trusted
   mouse event (CDP `Input.dispatchMouseEvent`) before believing a copy button is
   broken.
+- **`from __future__ import annotations` does not protect Pydantic on Python 3.9.**
+  Pydantic *evaluates* model fields, so `pos_number: int | None` raises
+  `TypeError: Unable to evaluate type annotation 'int | None'` at import on 3.9 —
+  while remaining perfectly valid on 3.10+. Use `Optional[int]`. This matters
+  here more than usual because **macOS ships Python 3.9.6** with the Command Line
+  Tools, so it is the default interpreter on any Mac without Homebrew.
+- **An installer must prove the app starts, not that the packages installed.**
+  `pip install` succeeding says nothing about whether the code runs. The
+  installer now does `./venv/bin/python -c "import app; assert app.app"` before
+  printing its summary, and refuses to claim success if that fails. That one line
+  catches annotation incompatibilities, missing imports and bad dependency
+  versions, on every platform.
 - **Probe `ensurepip`, not `venv`.** On Debian and Ubuntu `import venv` succeeds
   while `ensurepip` is missing, so a version-only check picks a Python that then
   dies during `python -m venv` with a message pointing at the wrong fix. Select on

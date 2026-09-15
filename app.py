@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Optional
+
 from pydantic import BaseModel
 
 # --------------------------------------------------------------------------
@@ -257,18 +259,26 @@ def log_event(conn: sqlite3.Connection, request_id: int, event: str,
 # --------------------------------------------------------------------------
 # Models
 # --------------------------------------------------------------------------
+# NOTE: `Optional[int]`, not `int | None`, in every BaseModel field.
+#
+# `from __future__ import annotations` makes function annotations lazy strings,
+# which is enough for ordinary code — but Pydantic EVALUATES model fields at
+# runtime, and `int | None` is a syntax error to the evaluator on Python 3.9.
+# macOS ships Python 3.9.6 with the Command Line Tools, so this is the default
+# interpreter on a Mac with no Homebrew, and it fails at import time with a
+# TypeError that mentions neither the model nor the field.
 class LoginReq(BaseModel):
     role: str
-    pos_number: int | None = None
+    pos_number: Optional[int] = None
 
 
 class ScanReq(BaseModel):
     so_number: str
-    note: str | None = None
+    note: Optional[str] = None
 
 
 class CancelReq(BaseModel):
-    reason: str | None = None
+    reason: Optional[str] = None
 
 
 # --------------------------------------------------------------------------

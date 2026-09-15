@@ -4,6 +4,11 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
+# Pydantic evaluates model type hints at runtime, and `X | None` is not valid to
+# that evaluator on Python 3.9 — which is exactly what macOS Command Line Tools
+# ship. Installing this lets Pydantic backport it. Belt and braces: the models
+# above are written with Optional[] anyway, so this only catches a future slip.
+eval_type_backport>=0.2 ; python_version < "3.10"
 # Only needed for the setup page QR code (so staff can scan the address instead
 # of typing an IP). The app degrades gracefully if Pillow is missing.
 qrcode>=7.4

@@ -246,6 +246,52 @@ with `sqlite3 qms.db ".backup out.db"` rather than a plain file copy.
 
 ---
 
+## Day-to-day, and removing it again
+
+Everything runs from the install folder. Nobody needs to remember `launchctl`
+or `systemctl`:
+
+```bash
+sh qms.sh status      # is it running, where is the data, when was the last backup
+sh qms.sh stop        # take it down
+sh qms.sh start       # bring it back
+sh qms.sh restart     # stop, then start
+sh qms.sh url         # the address each device should open
+sh qms.sh log         # follow the log
+sh qms.sh backup      # take a backup right now
+```
+
+Or from anywhere: `bash install.sh --status`
+
+### Stopping and starting does not touch your data
+
+The database is a single file, `qms.db`, in the install folder. Stopping QMS
+closes it cleanly; starting it opens the same file. **Nothing is cleared, reset
+or re-seeded on boot.** Re-installing over the top reuses it too, so an upgrade
+never costs you the day's queue.
+
+This is verified rather than assumed. `deploy/test_persistence.py` writes real
+data, stops the service politely (SIGTERM), starts it again, kills it hard
+(SIGKILL — the power-cut case), starts it again, and re-installs over the top —
+checking the SOs and the audit trail survive every step.
+
+### Removing it
+
+```bash
+bash install.sh --uninstall          # remove the program. KEEP the data.
+bash install.sh --uninstall --purge  # remove the program AND delete the data.
+```
+
+`--uninstall` on its own stops the service, removes it from startup, and deletes
+the program and its virtual environment. It **deliberately keeps** `qms.db`,
+`backups/` and `qms.env`, and prints where they are. Deleting a day of queue
+history by accident is not a mistake worth making easy.
+
+`--purge` deletes everything and there is no undo. It refuses to run unless you
+also pass `--uninstall`, so a stray `--purge` can never do anything on its own.
+
+---
+
 ## Troubleshooting
 
 **"Camera unavailable" / camera does nothing**

@@ -44,13 +44,34 @@ bad()  { printf '    \033[0;31m✗\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[0;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# `--check` inspects the machine and stops. Nothing is downloaded, nothing is
-# written, no service is touched — so it is safe to run anywhere, including on a
-# machine you have not decided to deploy to yet.
-CHECK_ONLY="${CHECK_ONLY:-0}"
+# Modes. The default is to install.
+#   --check      inspect and report only. Nothing downloaded, nothing written,
+#                no service touched, so it is safe on a machine you have not
+#                decided about yet.
+#   --status     what is installed, is it running, where is the data
+#   --uninstall  remove the service and the app, KEEP the data
+#   --purge      with --uninstall: delete the data too
+MODE="install"
+PURGE="${QMS_PURGE:-0}"
 for _a in "$@"; do
-  case "$_a" in --check|-c|--dry-run) CHECK_ONLY=1 ;; esac
+  case "$_a" in
+    --check|-c|--dry-run) MODE=check ;;
+    --status)             MODE=status ;;
+    --uninstall|--remove) MODE=uninstall ;;
+    --purge)              PURGE=1 ;;
+    -h|--help|help)       MODE=help ;;
+  esac
 done
+# `--purge` on its own must never mean anything. Deleting a store's whole queue
+# history is not something to trigger by typing one word.
+if [ "$PURGE" = "1" ] && [ "$MODE" != "uninstall" ]; then
+  printf '\n\033[0;31mERROR: --purge only means something together with --uninstall.\033[0m\n' >&2
+  printf '       To remove QMS but keep the data:   bash install.sh --uninstall\n\n' >&2
+  exit 1
+fi
+CHECK_ONLY=0
+[ "$MODE" = "check" ] && CHECK_ONLY=1
+export CHECK_ONLY
 
 REPO_SLUG="${QMS_REPO:-mozaiz/qms-so-fulfilment}"
 
@@ -60,10 +81,14 @@ else
   SRC_DIR=""
 fi
 
+# The service label is used by the macOS LaunchAgents AND by the qms.sh helper
+# on both platforms, so it is set unconditionally — leaving it undefined on
+# Linux trips `set -u` the moment anything reads it.
+LABEL="com.machines.qms"
+
 if [ "$OS" = macos ]; then
   APP_DIR="${APP_DIR:-$HOME/QMS}"
   SERVICE="${SERVICE:-auto}"
-  LABEL="com.machines.qms"
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 else
   APP_DIR="${APP_DIR:-/opt/qms}"
@@ -80,6 +105,199 @@ SUDO=""
 if [ "$OS" = linux ] && [ "$NO_SUDO" != "1" ] && have sudo && sudo -n true 2>/dev/null; then
   SUDO="sudo"
 fi
+
+# ==================================================== help / status / uninstall
+#
+# These run before the preflight because none of them needs Python. Removing a
+# service should work even on a machine whose Python has since been uninstalled.
+
+do_help() {
+  cat <<HELP
+
+  QMS — SO Fulfilment. One command, Linux and macOS.
+
+      bash install.sh                 install, or upgrade an existing install
+      bash install.sh --check         inspect this computer, change nothing
+      bash install.sh --status        is it running, where is the data
+      bash install.sh --uninstall     remove it, KEEP the data
+      bash install.sh --uninstall --purge
+                                      remove it AND delete the data
+
+  Options you can put in front:
+
+      QMS_PORT=8099                   port to listen on     (default 8099)
+      STORE_CODE=MCSQ01               store identifier
+      STORE_NAME="Machines Alor Setar"  what the sign-in screen shows
+      APP_DIR=/opt/qms                where to install (default ~/QMS on macOS)
+
+  Everyday use, once installed — short commands, no launchctl or systemctl:
+
+      ~/QMS/qms.sh status | stop | start | restart | log | backup | url
+
+HELP
+}
+
+# Read a couple of counters straight out of the database. No server needed, so
+# this works even when QMS is stopped or broken.
+db_counts() {
+  _db="$1"
+  [ -f "$_db" ] || { echo ""; return 0; }
+  _py="$APP_DIR/venv/bin/python"
+  [ -x "$_py" ] || _py="python3"
+  "$_py" - "$_db" 2>/dev/null <<'PYEOF' || echo ""
+import sqlite3, sys
+try:
+    c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+    total = c.execute("SELECT COUNT(*) FROM so_requests").fetchone()[0]
+    today = c.execute("SELECT day_key, COUNT(*) FROM so_requests "
+                      "GROUP BY day_key ORDER BY day_key DESC LIMIT 1").fetchone()
+    print(f"{total}|{today[0] if today else '-'}|{today[1] if today else 0}")
+except Exception:
+    print("")
+PYEOF
+}
+
+service_state() {
+  if [ "$OS" = macos ]; then
+    if launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then echo "loaded"; else echo "not loaded"; fi
+  else
+    if systemctl is-active --quiet qms 2>/dev/null; then echo "running"
+    elif systemctl --user is-active --quiet qms 2>/dev/null; then echo "running (user)"
+    elif [ -f /etc/systemd/system/qms.service ] || [ -f "$HOME/.config/systemd/user/qms.service" ]; then echo "installed but stopped"
+    else echo "not installed"; fi
+  fi
+}
+
+do_status() {
+  say "QMS status"
+
+  printf '    %-14s %s\n' "Service" "$(service_state)"
+
+  _port="${QMS_PORT:-8099}"
+  [ -f "$APP_DIR/qms.env" ] && _port="$(sed -n 's/^QMS_PORT=//p' "$APP_DIR/qms.env" | head -1)"
+  _health="$(curl -fsS --max-time 3 "http://127.0.0.1:$_port/api/health" 2>/dev/null || true)"
+  if [ -n "$_health" ]; then
+    printf '    %-14s %s\n' "Answering" "yes — $(printf '%s' "$_health" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p') on port $_port"
+  else
+    printf '    %-14s %s\n' "Answering" "no"
+  fi
+
+  if [ -f "$APP_DIR/app.py" ]; then
+    printf '    %-14s %s\n' "Installed" "$APP_DIR"
+  else
+    printf '    %-14s %s\n' "Installed" "no app found in $APP_DIR"
+  fi
+
+  _db="$APP_DIR/qms.db"
+  if [ -f "$_db" ]; then
+    _c="$(db_counts "$_db")"
+    _sz="$(du -h "$_db" 2>/dev/null | awk '{print $1}')"
+    if [ -n "$_c" ]; then
+      _t="${_c%%|*}"; _rest="${_c#*|}"; _d="${_rest%%|*}"; _n="${_rest##*|}"
+      printf '    %-14s %s\n' "Data" "$_db  ($_sz)"
+      printf '    %-14s %s\n' "" "$_t SOs in total — $_n on the most recent day ($_d)"
+    else
+      printf '    %-14s %s\n' "Data" "$_db  ($_sz)"
+    fi
+  else
+    printf '    %-14s %s\n' "Data" "no database yet in $APP_DIR"
+  fi
+
+  if [ -d "$APP_DIR/backups" ]; then
+    _b="$(ls -t "$APP_DIR"/backups/qms_*.db 2>/dev/null | head -1)"
+    _bn="$(ls "$APP_DIR"/backups/qms_*.db 2>/dev/null | wc -l | tr -d ' ')"
+    if [ -n "$_b" ]; then
+      printf '    %-14s %s\n' "Last backup" "$(basename "$_b" .db)  ($_bn kept)"
+    fi
+  fi
+
+  if [ "$OS" = macos ]; then
+    _ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo '')"
+  else
+    _ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  printf '\n    Open on this computer : http://localhost:%s\n' "$_port"
+  [ -n "$_ip" ] && printf '    Open on other devices : http://%s:%s\n' "$_ip" "$_port"
+  printf '\n'
+}
+
+do_uninstall() {
+  say "Removing QMS"
+
+  # Refuse to touch anything that is not a QMS install. A stray APP_DIR is how
+  # an uninstaller deletes somebody's home directory.
+  if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "$HOME" ]; then
+    die "refusing to uninstall from '$APP_DIR' — that is not a QMS folder"
+  fi
+  if [ "$PURGE" = "1" ] && [ ! -f "$APP_DIR/app.py" ]; then
+    die "refusing to purge '$APP_DIR' — there is no QMS install there to delete"
+  fi
+
+  # --- 1. stop it and take it out of startup
+  if [ "$OS" = macos ]; then
+    launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+    launchctl bootout "gui/$UID/$LABEL.backup" 2>/dev/null || true
+    rm -f "$PLIST" "$HOME/Library/LaunchAgents/$LABEL.backup.plist" 2>/dev/null || true
+    ok "launch agents removed — it will no longer start at login"
+  else
+    if [ -f /etc/systemd/system/qms.service ]; then
+      $SUDO systemctl disable --now qms 2>/dev/null || true
+      $SUDO rm -f /etc/systemd/system/qms.service
+      $SUDO systemctl daemon-reload 2>/dev/null || true
+      ok "system service removed"
+    fi
+    if [ -f "$HOME/.config/systemd/user/qms.service" ]; then
+      systemctl --user disable --now qms 2>/dev/null || true
+      rm -f "$HOME/.config/systemd/user/qms.service"
+      systemctl --user daemon-reload 2>/dev/null || true
+      ok "user service removed"
+    fi
+    if [ -f /etc/cron.daily/qms-backup ]; then
+      $SUDO rm -f /etc/cron.daily/qms-backup
+      ok "nightly backup job removed"
+    fi
+  fi
+
+  # --- 2. the data. Kept by default, and said out loud.
+  if [ "$PURGE" = "1" ]; then
+    if [ -f "$APP_DIR/qms.db" ]; then
+      _c="$(db_counts "$APP_DIR/qms.db")"
+      _t="${_c%%|*}"
+      warn "deleting the database — ${_t:-?} SOs"
+    fi
+    rm -rf "$APP_DIR"
+    ok "everything removed, including the data"
+    printf '\n    Gone for good. If you wanted a copy, it is too late now —\n'
+    printf '    next time run --uninstall without --purge and keep qms.db.\n\n'
+  else
+    # Remove the program, leave the data where a re-install will find it.
+    for f in app.py requirements.txt run.sh install.sh qms.sh qms-backup.sh \
+             make_test_barcodes.py make_qr_card.py make_preview.py seed_demo.py \
+             test_flow.py README.md INSTALL.md LICENSE START-HERE.txt \
+             Dockerfile docker-compose.yml qms.env.example; do
+      rm -f "$APP_DIR/$f" 2>/dev/null || true
+    done
+    rm -rf "$APP_DIR/venv" "$APP_DIR/static" "$APP_DIR/deploy" "$APP_DIR/__pycache__" 2>/dev/null || true
+    rm -f "$APP_DIR/qr_card_"*.png "$APP_DIR/qr_card_"*.pdf "$APP_DIR/test_barcodes.png" 2>/dev/null || true
+    ok "the program has been removed"
+
+    printf '\n    KEPT, in %s:\n\n' "$APP_DIR"
+    [ -f "$APP_DIR/qms.db" ] && printf '      qms.db        your data — every SO ever scanned\n'
+    [ -d "$APP_DIR/backups" ] && printf '      backups/      the nightly copies\n'
+    [ -f "$APP_DIR/qms.env" ] && printf '      qms.env       the store settings\n'
+    printf '\n    Deleting a day of queue history by accident is unforgivable, so\n'
+    printf '    this was kept on purpose. Nothing is running any more.\n\n'
+    printf '    To put QMS back, run the installer again — it picks this up and\n'
+    printf '    carries on with the same data.\n'
+    printf '    To delete the data as well:  bash install.sh --uninstall --purge\n\n'
+  fi
+}
+
+case "$MODE" in
+  help)      do_help; exit 0 ;;
+  status)    do_status; exit 0 ;;
+  uninstall) do_uninstall; exit 0 ;;
+esac
 
 # ================================================================ 0. PREFLIGHT
 #
@@ -549,39 +767,100 @@ WantedBy=multi-user.target"
   esac
 fi
 
+# ---------------------------------------------------------------- 5b. qms.sh
+# Everyday commands, in words a shop-floor person already knows. Nobody should
+# have to remember `launchctl kickstart -k gui/501/com.machines.qms`.
+cat > "$APP_DIR/qms.sh" <<HELPER
+#!/bin/sh
+# QMS helper — everyday commands.
+#
+#   ./qms.sh status      is it running, where is the data
+#   ./qms.sh stop        take it down  (your data is NOT touched)
+#   ./qms.sh start       bring it back
+#   ./qms.sh restart     stop, then start
+#   ./qms.sh url         the address to open on each device
+#   ./qms.sh log         follow the log
+#   ./qms.sh backup      take a backup right now
+#   ./qms.sh uninstall   remove the program, keep the data
+
+APP_DIR="$APP_DIR"
+LABEL="$LABEL"
+OS="$OS"
+PORT="$(sed -n 's/^QMS_PORT=//p' "$APP_DIR/qms.env" 2>/dev/null | head -1)"
+[ -n "\$PORT" ] || PORT="$QMS_PORT"
+
+svc() {
+  if [ "\$OS" = macos ]; then
+    PLIST="\$HOME/Library/LaunchAgents/\$LABEL.plist"
+    case "\$1" in
+      stop)  launchctl bootout "gui/\$(id -u)/\$LABEL" 2>/dev/null ;;
+      start) launchctl bootstrap "gui/\$(id -u)" "\$PLIST" 2>/dev/null \\
+               || launchctl load -w "\$PLIST" 2>/dev/null ;;
+    esac
+  else
+    if [ -f /etc/systemd/system/qms.service ]; then
+      sudo systemctl "\$1" qms 2>/dev/null || systemctl "\$1" qms 2>/dev/null
+    else
+      systemctl --user "\$1" qms 2>/dev/null
+    fi
+  fi
+}
+
+case "\$1" in
+  status|uninstall|check)
+    exec "\$APP_DIR/install.sh" "--\$1" ;;
+  url)
+    echo "On this computer : http://localhost:\$PORT"
+    if [ "\$OS" = macos ]; then
+      IP="\$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)"
+    else
+      IP="\$(hostname -I 2>/dev/null | awk '{print \$1}')"
+    fi
+    [ -n "\$IP" ] && echo "On other devices : http://\$IP:\$PORT"
+    ;;
+  log)
+    [ -f "\$APP_DIR/qms.log" ] || { echo "No log yet at \$APP_DIR/qms.log"; exit 1; }
+    tail -f "\$APP_DIR/qms.log" ;;
+  backup)
+    sh "\$APP_DIR/qms-backup.sh" && echo "Backup written to \$APP_DIR/backups"
+    ls -t "\$APP_DIR"/backups/qms_*.db 2>/dev/null | head -3 ;;
+  stop)
+    echo "Stopping QMS. Your data is not touched."
+    svc stop
+    echo "Stopped. Nothing is reachable until you run:  ./qms.sh start"
+    ;;
+  start)
+    svc start
+    sleep 2
+    exec "\$APP_DIR/install.sh" --status ;;
+  restart)
+    "\$0" stop >/dev/null 2>&1
+    "\$0" start ;;
+  ""|-h|--help|help)
+    sed -n '2,13p' "\$0" ;;
+  *)
+    echo "Unknown command: \$1"
+    sed -n '2,13p' "\$0"
+    exit 1 ;;
+esac
+HELPER
+chmod +x "$APP_DIR/qms.sh"
+ok "wrote $APP_DIR/qms.sh  (status | stop | start | restart | url | log | backup)"
+
 # ---------------------------------------------------------------- 6. backup
-if [ "$OS" = linux ] && [ -n "$SUDO" ] && [ -d /etc/cron.daily ]; then
-  $SUDO tee /etc/cron.daily/qms-backup >/dev/null <<BK
+#
+# The backup script is written on EVERY platform, so `qms.sh backup` works
+# everywhere and there is one implementation to trust and test. Only the
+# SCHEDULING differs — and where we cannot schedule it, saying so beats
+# pretending it is handled.
+#
+# It uses the venv's Python rather than the sqlite3 command line: the python is
+# already here, whereas the sqlite3 binary is not guaranteed on Linux, and
+# Connection.backup() IS the online backup API. A copy taken with `cp` while the
+# app is writing gives a file that cannot be restored.
+cat > "$APP_DIR/qms-backup.sh" <<BK
 #!/bin/sh
-# SQLite online backup, 30 day retention. Local only.
-STAMP=\$(date +%F_%H%M)
-mkdir -p /var/backups/qms
-if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "$APP_DIR/qms.db" ".backup /var/backups/qms/qms_\$STAMP.db"
-else
-  cp "$APP_DIR/qms.db" "/var/backups/qms/qms_\$STAMP.db"
-fi
-find /var/backups/qms -name 'qms_*.db' -mtime +30 -delete
-BK
-  $SUDO chmod +x /etc/cron.daily/qms-backup
-  ok "nightly backup -> /var/backups/qms (30 days)"
-elif [ "$OS" = macos ]; then
-  # launchd rather than cron: cron needs Full Disk Access on modern macOS and
-  # silently does nothing without it. A LaunchAgent always works.
-  #
-  # The work lives in its own script rather than a long inline `sh -c` string:
-  # it stays readable, and it keeps the plist free of shell quoting.
-  #
-  # It uses the venv's Python rather than the sqlite3 command line. The python
-  # is already here, whereas the sqlite3 binary is not guaranteed on Linux, and
-  # `Connection.backup()` IS the online backup API — a copy taken with `cp`
-  # while the app is writing gives a file that cannot be restored.
-  #
-  # No `xargs` either: GNU has `-r`, BSD does not, and the difference only shows
-  # up on the machine you cannot easily debug.
-  cat > "$APP_DIR/qms-backup.sh" <<BK
-#!/bin/sh
-# Nightly QMS database backup, 30 day retention. Local only.
+# QMS database backup, 30 day retention. Local only.
 APP_DIR="$APP_DIR"
 STAMP=\$(date +%F_%H%M)
 mkdir -p "\$APP_DIR/backups" || exit 1
@@ -597,13 +876,18 @@ s.close()
 d.close()
 PYEOF
 
-# keep the newest 30, delete anything older
+# keep the newest 30, delete anything older.
+# No xargs: GNU has -r and BSD does not, and the difference only shows up on the
+# machine you cannot easily debug.
 ls -t "\$APP_DIR"/backups/qms_*.db 2>/dev/null | tail -n +31 | while read -r f; do
   rm -f "\$f"
 done
 BK
-  chmod +x "$APP_DIR/qms-backup.sh"
+chmod +x "$APP_DIR/qms-backup.sh"
 
+if [ "$OS" = macos ]; then
+  # launchd rather than cron: cron needs Full Disk Access on modern macOS and
+  # silently does nothing without it. A LaunchAgent always works.
   BPLIST="$HOME/Library/LaunchAgents/$LABEL.backup.plist"
   cat > "$BPLIST" <<BPL
 <?xml version="1.0" encoding="UTF-8"?>
@@ -630,6 +914,18 @@ BPL
     || launchctl load -w "$BPLIST" 2>/dev/null \
     || warn "backup agent not loaded"
   ok "nightly backup -> $APP_DIR/backups (30 days, 3:30am)"
+elif [ -n "$SUDO" ] && [ -d /etc/cron.daily ]; then
+  $SUDO tee /etc/cron.daily/qms-backup >/dev/null <<CRON
+#!/bin/sh
+# Nightly QMS backup. Calls the shared script so there is only one
+# implementation, and it is the one the tests exercise.
+exec "$APP_DIR/qms-backup.sh"
+CRON
+  $SUDO chmod +x /etc/cron.daily/qms-backup
+  ok "nightly backup -> $APP_DIR/backups (30 days)"
+else
+  warn "no automatic backup scheduled on this machine"
+  warn "run '$APP_DIR/qms.sh backup' yourself, or re-run this with sudo"
 fi
 
 # ---------------------------------------------------------------- 7. wait + summary

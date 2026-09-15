@@ -59,6 +59,37 @@ them: System Settings -> Network -> Firewall -> Options -> allow python.
 Also keep automatic login ON for this Mac. QMS starts when you log in.
 
 
+EVERYDAY COMMANDS
+-----------------
+From the QMS folder, these are the only ones you need. Your data is NEVER
+touched by stopping or starting — the database just sits there.
+
+    sh qms.sh status      is it running, where is the data, last backup
+    sh qms.sh stop        take it down (your data is kept)
+    sh qms.sh start       bring it back
+    sh qms.sh restart     stop, then start
+    sh qms.sh url         the address to open on each device
+    sh qms.sh log         watch the log
+    sh qms.sh backup      take a backup right now
+
+Common one: it says "Answering: no" -> sh qms.sh restart
+
+
+REMOVING QMS
+------------
+    bash install.sh --uninstall
+
+That removes the program and stops it starting at login. IT KEEPS YOUR DATA -
+qms.db, the backups and the settings all stay in this folder. Nothing is lost,
+and running the installer again picks the data straight back up.
+
+Only if you really mean it:
+
+    bash install.sh --uninstall --purge
+
+...which deletes the data too, for good. There is no undo.
+
+
 IF SOMETHING GOES WRONG
 -----------------------
    Read the log:

@@ -48,6 +48,16 @@ jobs:
           python seed_demo.py
           python test_flow.py http://127.0.0.1:8099
 
+      # The installer, the data-survives-a-restart guarantee, and the
+      # install/uninstall lifecycle. These are the promises a store is told to
+      # rely on, so they are asserted rather than described.
+      - name: Installer, persistence and lifecycle suites
+        run: |
+          set -e
+          bash deploy/test_install_linux.sh
+          python deploy/test_persistence.py
+          python deploy/test_lifecycle.py
+
       - name: Server log on failure
         if: failure()
         run: tail -60 /tmp/qms.log || true

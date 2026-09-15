@@ -26,6 +26,9 @@ building**.
 
 Windows: copy the folder and double-click `deploy\Install QMS (Windows).cmd`.
 
+Or grab a ready-made archive from the **Releases** page — it contains everything
+an outlet needs and nothing else.
+
 Full step-by-step, written for whoever is setting it up at the outlet:
 **[INSTALL.md](INSTALL.md)**
 
@@ -34,6 +37,18 @@ Then print the wall sign — this is the entire staff training:
 ```bash
 ./venv/bin/python make_qr_card.py     # -> qr_card_<STORE>.pdf (A4)
 ```
+
+To cut a release:
+
+```bash
+git tag v0.3.1 && git push origin v0.3.1
+```
+
+CI builds the archives, **installs one in a clean container and boots it** to prove
+it works, then attaches `qms-<version>.zip`, `.tar.gz` and `SHA256SUMS.txt` to the
+release.
+
+Licence: MIT — see [LICENSE](LICENSE).
 
 ---
 

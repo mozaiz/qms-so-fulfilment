@@ -18,3 +18,9 @@ qr_card_*.png
 qr_card_*.pdf
 test_barcodes.png
 *.log
+
+# --- release packaging ------------------------------------------------------
+dist/
+qms-*.zip
+qms-*.tar.gz
+SHA256SUMS.txt

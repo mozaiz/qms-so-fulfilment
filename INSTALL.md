@@ -41,10 +41,11 @@ use Path B on a mini PC, or the manual steps at the bottom.</sub>
 Plug in the box, open a terminal, and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-org>/qms/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash
 ```
 
-Or, if you already copied the folder over:
+Or, if you already copied the folder over, or downloaded an archive from the
+[Releases page](https://github.com/mozaiz/qms-so-fulfilment/releases):
 
 ```bash
 cd qms

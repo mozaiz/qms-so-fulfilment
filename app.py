@@ -1,0 +1,1055 @@
+"""
+QMS v3 — SO Fulfilment (Machines, internal).
+
+Roles:
+  scanner   — scans the customer's SO barcode, sees what they scanned
+  pos 1..4  — claims an SO to their POS so backstore knows where to deliver
+  backstore — picks the item, walks it to the POS, ticks it delivered
+  manager   — everything + stats
+
+Flow:  scanned  ->  assigned (POS claimed)  ->  delivered (backstore ticked)
+                   \\-> cancelled
+
+Local-first: SQLite on the in-store box.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import re
+import secrets
+import sqlite3
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+# --------------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------------
+TZ = ZoneInfo(os.environ.get("QMS_TZ", "Asia/Kuala_Lumpur"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("QMS_DB", os.path.join(BASE_DIR, "qms.db"))
+
+SLA_MINUTES = int(os.environ.get("QMS_SLA_MIN", "10"))    # claimed -> delivered
+STALE_MINUTES = int(os.environ.get("QMS_STALE_MIN", "15"))  # scanned -> not claimed
+DEDUPE_MINUTES = int(os.environ.get("QMS_DEDUPE_MIN", "5"))
+
+POS_COUNT = int(os.environ.get("QMS_POS_COUNT", "4"))
+STORE_CODE = os.environ.get("QMS_STORE_CODE", "MCSQ01")
+STORE_NAME = os.environ.get("QMS_STORE_NAME", "Machines — Pilot Store")
+
+ROLE_SCANNER = "scanner"
+ROLE_POS = "pos"
+ROLE_BACKSTORE = "backstore"
+ROLE_MANAGER = "manager"
+ROLES = (ROLE_SCANNER, ROLE_POS, ROLE_BACKSTORE, ROLE_MANAGER)
+
+# Real Machines SO barcode, e.g. MACSO26-00142463.
+# Soft validation only — a mismatch is flagged, never rejected, because other
+# document types may legitimately get scanned.
+SO_PATTERN = re.compile(r"^MACSO\d{2}-\d{8}$")
+
+
+def so_format_ok(so: str) -> bool:
+    return bool(SO_PATTERN.match(so or ""))
+
+
+# --------------------------------------------------------------------------
+# Time helpers
+# --------------------------------------------------------------------------
+def now() -> datetime:
+    return datetime.now(TZ)
+
+
+def iso(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds")
+
+
+def today_key(dt: datetime | None = None) -> str:
+    return (dt or now()).strftime("%Y-%m-%d")
+
+
+def parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def mins_between(a: datetime | None, b: datetime | None) -> float | None:
+    if not a or not b:
+        return None
+    return round((b - a).total_seconds() / 60, 1)
+
+
+# --------------------------------------------------------------------------
+# DB
+# --------------------------------------------------------------------------
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS stores (
+    id      INTEGER PRIMARY KEY,
+    code    TEXT UNIQUE NOT NULL,
+    name    TEXT NOT NULL,
+    address TEXT
+);
+
+CREATE TABLE IF NOT EXISTS staff (
+    id         INTEGER PRIMARY KEY,
+    store_id   INTEGER NOT NULL REFERENCES stores(id),
+    name       TEXT NOT NULL,
+    code       TEXT UNIQUE NOT NULL,
+    role       TEXT NOT NULL CHECK(role IN ('scanner','pos','backstore','manager')),
+    pos_number INTEGER,
+    is_active  INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    staff_id   INTEGER NOT NULL REFERENCES staff(id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS so_requests (
+    id           INTEGER PRIMARY KEY,
+    store_id     INTEGER NOT NULL REFERENCES stores(id),
+    day_key      TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    ref_no       TEXT NOT NULL,
+    so_number    TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'scanned',
+
+    scanned_by   INTEGER NOT NULL,
+    scanned_at   TEXT NOT NULL,
+
+    pos_number   INTEGER,
+    claimed_by   INTEGER,
+    claimed_at   TEXT,
+
+    delivered_by INTEGER,
+    delivered_at TEXT,
+
+    cancelled_by INTEGER,
+    cancelled_at TEXT,
+    cancel_reason TEXT,
+
+    note         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_req_store_day ON so_requests(store_id, day_key);
+CREATE INDEX IF NOT EXISTS idx_req_so        ON so_requests(store_id, so_number);
+CREATE INDEX IF NOT EXISTS idx_req_status    ON so_requests(store_id, day_key, status);
+CREATE INDEX IF NOT EXISTS idx_req_scanner   ON so_requests(scanned_by);
+
+-- One OPEN request per SO per day, enforced by the database itself.
+-- CSV cannot express this; it is what stops two scanner taps creating twins.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_open_so
+    ON so_requests(store_id, day_key, so_number)
+    WHERE status IN ('scanned','assigned');
+
+CREATE TABLE IF NOT EXISTS so_events (
+    id         INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL REFERENCES so_requests(id),
+    event      TEXT NOT NULL,
+    actor_id   INTEGER,
+    at         TEXT NOT NULL,
+    meta       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_soevents_req ON so_events(request_id);
+"""
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Additive migrations — safe to run on every boot, on an existing database."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(stores)").fetchall()}
+    if "pos_count" not in cols:
+        conn.execute("ALTER TABLE stores ADD COLUMN pos_count INTEGER NOT NULL DEFAULT 4")
+        # an existing store already has staff rows for its POS counters
+        have = conn.execute(
+            "SELECT COALESCE(MAX(pos_number),0) m FROM staff WHERE role='pos'"
+        ).fetchone()["m"]
+        conn.execute("UPDATE stores SET pos_count = ? WHERE pos_count < ?",
+                     (max(int(have), 1), max(int(have), 1)))
+    conn.commit()
+
+
+def pos_count_of(conn: sqlite3.Connection, store_id: int) -> int:
+    row = conn.execute("SELECT pos_count FROM stores WHERE id = ?", (store_id,)).fetchone()
+    n = row["pos_count"] if row else POS_COUNT
+    return int(n or POS_COUNT)
+
+
+def init_db() -> None:
+    conn = get_db()
+    try:
+        conn.executescript(SCHEMA)
+        migrate(conn)
+        row = conn.execute("SELECT id FROM stores WHERE code = ?", (STORE_CODE,)).fetchone()
+        if row is None:
+            cur = conn.execute(
+                "INSERT INTO stores (code, name, address, pos_count) VALUES (?,?,?,?)",
+                (STORE_CODE, STORE_NAME, "", POS_COUNT),
+            )
+            store_id = cur.lastrowid
+        else:
+            store_id = row["id"]
+
+        count = conn.execute(
+            "SELECT COUNT(*) c FROM staff WHERE store_id = ?", (store_id,)
+        ).fetchone()["c"]
+        if count == 0:
+            seed = [(store_id, "Scanner", "scanner", ROLE_SCANNER, None)]
+            for n in range(1, POS_COUNT + 1):
+                seed.append((store_id, f"POS {n}", f"pos{n}", ROLE_POS, n))
+            seed.append((store_id, "Backstore", "backstore", ROLE_BACKSTORE, None))
+            seed.append((store_id, "Manager", "manager", ROLE_MANAGER, None))
+            conn.executemany(
+                "INSERT INTO staff (store_id, name, code, role, pos_number) VALUES (?,?,?,?,?)",
+                seed,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_event(conn: sqlite3.Connection, request_id: int, event: str,
+              actor_id: int | None = None, meta: dict | None = None) -> None:
+    conn.execute(
+        "INSERT INTO so_events (request_id, event, actor_id, at, meta) VALUES (?,?,?,?,?)",
+        (request_id, event, actor_id, iso(now()),
+         None if meta is None else json.dumps(meta)),
+    )
+
+
+# --------------------------------------------------------------------------
+# Models
+# --------------------------------------------------------------------------
+class LoginReq(BaseModel):
+    role: str
+    pos_number: int | None = None
+
+
+class ScanReq(BaseModel):
+    so_number: str
+    note: str | None = None
+
+
+class CancelReq(BaseModel):
+    reason: str | None = None
+
+
+# --------------------------------------------------------------------------
+# App
+# --------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="QMS — SO Fulfilment", version="0.3.0", lifespan=lifespan)
+
+
+def request_to_dict(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    scanned = parse_dt(d.get("scanned_at"))
+    claimed = parse_dt(d.get("claimed_at"))
+    delivered = parse_dt(d.get("delivered_at"))
+    status = d["status"]
+
+    d["format_ok"] = so_format_ok(d.get("so_number"))
+    d["wait_pos_minutes"] = mins_between(scanned, claimed)
+    d["wait_deliver_minutes"] = mins_between(claimed, delivered)
+    d["total_minutes"] = mins_between(scanned, delivered)
+
+    # live elapsed for whatever stage it is stuck in
+    if status == "scanned":
+        d["elapsed_minutes"] = mins_between(scanned, now())
+    elif status == "assigned":
+        d["elapsed_minutes"] = mins_between(claimed, now())
+    else:
+        d["elapsed_minutes"] = d["total_minutes"]
+
+    # --- attention flags (shown red, never auto-actioned) ---
+    d["stale"] = False
+    d["no_pos_warning"] = False
+    d["sla_breach"] = False
+    reasons = []
+
+    if status == "scanned" and d["elapsed_minutes"] is not None:
+        if d["elapsed_minutes"] > STALE_MINUTES:
+            d["stale"] = True
+            reasons.append(f"No POS claimed yet ({int(d['elapsed_minutes'])} min)")
+    if status == "assigned" and d["elapsed_minutes"] is not None:
+        if d["elapsed_minutes"] > SLA_MINUTES:
+            d["sla_breach"] = True
+            reasons.append(f"Backstore has not delivered ({int(d['elapsed_minutes'])} min)")
+    if delivered and not d.get("pos_number"):
+        d["no_pos_warning"] = True
+        reasons.append("Delivered without a POS")
+
+    d["attention"] = bool(reasons)
+    d["attention_reason"] = " · ".join(reasons)
+    return d
+
+
+# ---- auth -----------------------------------------------------------------
+def current_staff(request: Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Not logged in")
+    token = auth[7:].strip()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """SELECT s.id, s.name, s.code, s.role, s.pos_number, s.store_id,
+                      st.code AS store_code, st.name AS store_name
+               FROM sessions se
+               JOIN staff s   ON se.staff_id = s.id
+               JOIN stores st ON s.store_id = st.id
+               WHERE se.token = ? AND s.is_active = 1""",
+            (token,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(401, "Session expired")
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def require_role(me: dict, *roles: str) -> None:
+    if me["role"] not in roles:
+        raise HTTPException(403, "Not allowed for your role")
+
+
+@app.post("/api/login")
+def login(req: LoginReq):
+    """Role-picker login. No PIN — store-internal by design."""
+    role = (req.role or "").strip().lower()
+    if role not in ROLES:
+        raise HTTPException(400, "Unknown role")
+
+    conn = get_db()
+    try:
+        store = conn.execute("SELECT * FROM stores ORDER BY id LIMIT 1").fetchone()
+        n_pos = pos_count_of(conn, store["id"]) if store else POS_COUNT
+
+        if role == ROLE_POS:
+            n = req.pos_number
+            if n is None or not (1 <= int(n) <= n_pos):
+                raise HTTPException(400, f"POS number must be 1-{n_pos}")
+            row = conn.execute(
+                "SELECT * FROM staff WHERE role='pos' AND pos_number=? AND is_active=1", (int(n),)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM staff WHERE role=? AND is_active=1 ORDER BY id LIMIT 1", (role,)
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Role not configured")
+
+        token = secrets.token_hex(32)
+        conn.execute(
+            "INSERT INTO sessions (token, staff_id, created_at) VALUES (?,?,?)",
+            (token, row["id"], iso(now())),
+        )
+        conn.commit()
+        return {
+            "token": token,
+            "staff": {
+                "id": row["id"], "name": row["name"],
+                "role": row["role"], "pos_number": row["pos_number"],
+            },
+            "store": {"id": row["store_id"], "code": STORE_CODE, "name": STORE_NAME},
+            "pos_count": n_pos,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM sessions WHERE token = ?", (auth[7:].strip(),))
+            conn.commit()
+        finally:
+            conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(me: dict = Depends(current_staff)):
+    conn = get_db()
+    try:
+        n_pos = pos_count_of(conn, me["store_id"])
+    finally:
+        conn.close()
+    return {
+        "staff": {"id": me["id"], "name": me["name"], "role": me["role"],
+                  "pos_number": me["pos_number"]},
+        "store": {"id": me["store_id"], "code": me["store_code"], "name": me["store_name"]},
+        "pos_count": n_pos,
+        "sla_minutes": SLA_MINUTES,
+        "stale_minutes": STALE_MINUTES,
+    }
+
+
+# ---- scan (scanner) -------------------------------------------------------
+@app.post("/api/v1/requests/scan")
+def scan(req: ScanReq, me: dict = Depends(current_staff)):
+    require_role(me, ROLE_SCANNER, ROLE_MANAGER)
+    so = re.sub(r"\s+", "", (req.so_number or "")).upper()
+    if not so:
+        raise HTTPException(400, "SO number required")
+    if len(so) > 60:
+        raise HTTPException(400, "SO number too long")
+
+    conn = get_db()
+    try:
+        day = today_key()
+
+        existing = conn.execute(
+            """SELECT * FROM so_requests
+               WHERE store_id=? AND so_number=? AND day_key=?
+                 AND status IN ('scanned','assigned')
+               ORDER BY id DESC LIMIT 1""",
+            (me["store_id"], so, day),
+        ).fetchone()
+        if existing:
+            log_event(conn, existing["id"], "rescan", me["id"])
+            conn.commit()
+            out = request_to_dict(existing)
+            out["duplicate"] = True
+            out["duplicate_reason"] = "This SO was already scanned and is still in progress"
+            return out
+
+        recent = conn.execute(
+            """SELECT * FROM so_requests
+               WHERE store_id=? AND so_number=? AND day_key=?
+               ORDER BY id DESC LIMIT 1""",
+            (me["store_id"], so, day),
+        ).fetchone()
+        if recent:
+            last = (parse_dt(recent["cancelled_at"]) or parse_dt(recent["delivered_at"])
+                    or parse_dt(recent["scanned_at"]))
+            if last and (now() - last) < timedelta(minutes=DEDUPE_MINUTES):
+                log_event(conn, recent["id"], "rescan_suppressed", me["id"])
+                conn.commit()
+                out = request_to_dict(recent)
+                out["duplicate"] = True
+                out["duplicate_reason"] = f"This SO was just completed (< {DEDUPE_MINUTES} min ago)"
+                return out
+
+        mx = conn.execute(
+            "SELECT COALESCE(MAX(seq),0) m FROM so_requests WHERE store_id=? AND day_key=?",
+            (me["store_id"], day),
+        ).fetchone()["m"]
+        seq = int(mx) + 1
+        ts = iso(now())
+        try:
+            cur = conn.execute(
+                """INSERT INTO so_requests
+                   (store_id, day_key, seq, ref_no, so_number, status,
+                    scanned_by, scanned_at, note)
+                   VALUES (?,?,?,?,?,'scanned',?,?,?)""",
+                (me["store_id"], day, seq, "#%03d" % seq, so, me["id"], ts, req.note),
+            )
+        except sqlite3.IntegrityError:
+            # lost a race against another scanner tap — return the winner
+            conn.rollback()
+            row = conn.execute(
+                """SELECT * FROM so_requests
+                   WHERE store_id=? AND so_number=? AND day_key=?
+                     AND status IN ('scanned','assigned') LIMIT 1""",
+                (me["store_id"], so, day),
+            ).fetchone()
+            out = request_to_dict(row)
+            out["duplicate"] = True
+            out["duplicate_reason"] = "This SO was already scanned (simultaneous scan)"
+            return out
+
+        rid = cur.lastrowid
+        log_event(conn, rid, "scanned", me["id"], {"so_number": so})
+        conn.commit()
+        row = conn.execute("SELECT * FROM so_requests WHERE id=?", (rid,)).fetchone()
+        out = request_to_dict(row)
+        out["duplicate"] = False
+        return out
+    finally:
+        conn.close()
+
+
+# ---- list -----------------------------------------------------------------
+BASE_SELECT = """
+SELECT r.*,
+       sc.name AS scanned_by_name,
+       cb.name AS claimed_by_name,
+       db.name AS delivered_by_name,
+       xb.name AS cancelled_by_name
+  FROM so_requests r
+  LEFT JOIN staff sc ON r.scanned_by   = sc.id
+  LEFT JOIN staff cb ON r.claimed_by   = cb.id
+  LEFT JOIN staff db ON r.delivered_by = db.id
+  LEFT JOIN staff xb ON r.cancelled_by = xb.id
+"""
+
+
+def fetch(conn, where: str, params: tuple, order: str, limit: int = 400):
+    rows = conn.execute(f"{BASE_SELECT} WHERE {where} ORDER BY {order} LIMIT {limit}", params).fetchall()
+    return [request_to_dict(r) for r in rows]
+
+
+def _envelope(rows, day):
+    open_r = [r for r in rows if r["status"] in ("scanned", "assigned")]
+    delivered = [r for r in rows if r["status"] == "delivered"]
+    tot = [r["total_minutes"] for r in delivered if r["total_minutes"] is not None]
+    return {
+        "day": day,
+        "sla_minutes": SLA_MINUTES,
+        "stale_minutes": STALE_MINUTES,
+        "requests": rows,
+        "scanned_count": sum(1 for r in rows if r["status"] == "scanned"),
+        "assigned_count": sum(1 for r in rows if r["status"] == "assigned"),
+        "delivered_count": len(delivered),
+        "cancelled_count": sum(1 for r in rows if r["status"] == "cancelled"),
+        "open_count": len(open_r),
+        "attention_count": sum(1 for r in rows if r["attention"]),
+        "avg_total": round(sum(tot) / len(tot), 1) if tot else 0,
+        "server_time": iso(now()),
+    }
+
+
+@app.get("/api/v1/requests")
+def list_requests(view: str = Query("today"), me: dict = Depends(current_staff)):
+    """
+    view:
+      today      — everything for today (default; every role polls this)
+      all        — everything, newest first
+      mine       — scanner: what I scanned / pos: what my POS claimed
+      unclaimed  — status 'scanned', waiting for a POS to claim  (POS screen)
+      todeliver  — status 'assigned', waiting for backstore      (backstore screen)
+    """
+    conn = get_db()
+    try:
+        day = today_key()
+        sid = me["store_id"]
+
+        if view == "unclaimed":
+            rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='scanned'",
+                         (sid, day), "r.seq")
+        elif view == "todeliver":
+            # assigned first (the real work), then SOs never claimed by any POS so
+            # backstore can still act on them (flagged with a warning, not blocked)
+            rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status IN ('assigned','scanned')",
+                         (sid, day), "CASE r.status WHEN 'assigned' THEN 0 ELSE 1 END, r.seq")
+        elif view == "mine":
+            if me["role"] == ROLE_POS:
+                rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.pos_number=?",
+                             (sid, day, me["pos_number"]), "r.seq DESC")
+            else:
+                rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.scanned_by=?",
+                             (sid, day, me["id"]), "r.seq DESC")
+        elif view == "all":
+            rows = fetch(conn, "r.store_id=?", (sid,), "r.id DESC")
+        else:  # today
+            rows = fetch(conn, "r.store_id=? AND r.day_key=?", (sid, day), "r.seq")
+
+        env = _envelope(rows, day)
+        env["view"] = view
+        return env
+    finally:
+        conn.close()
+
+
+# ---- actions --------------------------------------------------------------
+def _get(conn, rid: int, store_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM so_requests WHERE id=? AND store_id=?", (rid, store_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Request not found")
+    return row
+
+
+@app.post("/api/v1/requests/{rid}/claim")
+def claim(rid: int, me: dict = Depends(current_staff)):
+    """
+    POS claims an SO to their counter. This is a compare-and-swap: the UPDATE only
+    matches while the row is still 'scanned', so two POS tapping the same SO at the
+    same instant can never both win. This is the operation a CSV file cannot do.
+    """
+    require_role(me, ROLE_POS, ROLE_MANAGER)
+    pos_no = me["pos_number"] if me["role"] == ROLE_POS else None
+    if pos_no is None:
+        raise HTTPException(400, "This account has no POS number")
+
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            """UPDATE so_requests
+                  SET status='assigned', pos_number=?, claimed_by=?, claimed_at=?
+                WHERE id=? AND store_id=? AND status='scanned'""",
+            (pos_no, me["id"], iso(now()), rid, me["store_id"]),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            row = _get(conn, rid, me["store_id"])
+            if row["status"] == "assigned":
+                who = row["pos_number"]
+                raise HTTPException(
+                    409, f"Already claimed by POS {who}" if who else "Already claimed"
+                )
+            raise HTTPException(409, f"SO is '{row['status']}' — cannot claim")
+
+        log_event(conn, rid, "claimed", me["id"], {"pos_number": pos_no})
+        conn.commit()
+        return request_to_dict(_get(conn, rid, me["store_id"]))
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/requests/{rid}/release")
+def release(rid: int, me: dict = Depends(current_staff)):
+    """POS let go of an SO it claimed by mistake -> back to the unclaimed pool."""
+    require_role(me, ROLE_POS, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        pos_no = me["pos_number"]
+        if me["role"] == ROLE_MANAGER:
+            sql = ("UPDATE so_requests SET status='scanned', pos_number=NULL, "
+                   "claimed_by=NULL, claimed_at=NULL WHERE id=? AND store_id=? AND status='assigned'")
+            params = (rid, me["store_id"])
+        else:
+            sql = ("UPDATE so_requests SET status='scanned', pos_number=NULL, "
+                   "claimed_by=NULL, claimed_at=NULL "
+                   "WHERE id=? AND store_id=? AND status='assigned' AND pos_number=?")
+            params = (rid, me["store_id"], pos_no)
+        cur = conn.execute(sql, params)
+        if cur.rowcount == 0:
+            conn.rollback()
+            row = _get(conn, rid, me["store_id"])
+            if row["pos_number"] not in (None, pos_no) and me["role"] != ROLE_MANAGER:
+                raise HTTPException(409, f"This SO belongs to POS {row['pos_number']}")
+            raise HTTPException(409, f"SO is '{row['status']}' — cannot release")
+        log_event(conn, rid, "released", me["id"], {"pos_number": pos_no})
+        conn.commit()
+        return request_to_dict(_get(conn, rid, me["store_id"]))
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/requests/{rid}/deliver")
+def deliver(rid: int, me: dict = Depends(current_staff)):
+    """Backstore ticks: item handed over at the front."""
+    require_role(me, ROLE_BACKSTORE, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        row = _get(conn, rid, me["store_id"])
+        if row["status"] not in ("scanned", "assigned"):
+            raise HTTPException(409, f"{row['ref_no']} is '{row['status']}' — cannot mark delivered")
+
+        warn = None
+        if not row["pos_number"]:
+            warn = "Delivered without a POS"
+
+        conn.execute(
+            "UPDATE so_requests SET status='delivered', delivered_by=?, delivered_at=? WHERE id=?",
+            (me["id"], iso(now()), rid),
+        )
+        log_event(conn, rid, "delivered", me["id"],
+                  {"without_pos": not row["pos_number"]} if warn else None)
+        conn.commit()
+        out = request_to_dict(_get(conn, rid, me["store_id"]))
+        out["warning"] = warn
+        return out
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/requests/{rid}/cancel")
+def cancel(rid: int, req: CancelReq, me: dict = Depends(current_staff)):
+    require_role(me, ROLE_SCANNER, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        row = _get(conn, rid, me["store_id"])
+        # a scanner may only cancel what they themselves scanned
+        if me["role"] == ROLE_SCANNER and row["scanned_by"] != me["id"]:
+            raise HTTPException(403, "You can only cancel an SO you scanned yourself")
+        if row["status"] not in ("scanned", "assigned"):
+            raise HTTPException(409, f"{row['ref_no']} is '{row['status']}' — cannot cancel")
+
+        conn.execute(
+            """UPDATE so_requests
+                  SET status='cancelled', cancelled_by=?, cancelled_at=?, cancel_reason=?
+                WHERE id=?""",
+            (me["id"], iso(now()), req.reason, rid),
+        )
+        log_event(conn, rid, "cancelled", me["id"], {"reason": req.reason})
+        conn.commit()
+        return request_to_dict(_get(conn, rid, me["store_id"]))
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/requests/{rid}/events")
+def request_events(rid: int, me: dict = Depends(current_staff)):
+    conn = get_db()
+    try:
+        _get(conn, rid, me["store_id"])
+        rows = conn.execute(
+            """SELECT e.*, s.name AS actor_name FROM so_events e
+               LEFT JOIN staff s ON e.actor_id = s.id
+               WHERE e.request_id=? ORDER BY e.id""",
+            (rid,),
+        ).fetchall()
+        return {"events": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+# ---- stats ----------------------------------------------------------------
+@app.get("/api/v1/stats/today")
+def stats_today(me: dict = Depends(current_staff)):
+    require_role(me, ROLE_MANAGER, ROLE_BACKSTORE)
+    conn = get_db()
+    try:
+        day = today_key()
+        rows = fetch(conn, "r.store_id=? AND r.day_key=?", (me["store_id"], day), "r.seq")
+        delivered = [r for r in rows if r["status"] == "delivered"]
+
+        def avg(key):
+            vals = [r[key] for r in delivered if r.get(key) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else 0
+
+        def worst(key):
+            vals = [r[key] for r in delivered if r.get(key) is not None]
+            return round(max(vals), 1) if vals else 0
+
+        by_pos: dict[str, int] = {}
+        for r in rows:
+            if r["status"] in ("assigned", "delivered") and r["pos_number"]:
+                k = "POS %d" % r["pos_number"]
+                by_pos[k] = by_pos.get(k, 0) + 1
+
+        by_scanner: dict[str, int] = {}
+        for r in rows:
+            k = r["scanned_by_name"] or "-"
+            by_scanner[k] = by_scanner.get(k, 0) + 1
+
+        return {
+            "day": day,
+            "total": len(rows),
+            "scanned": sum(1 for r in rows if r["status"] == "scanned"),
+            "assigned": sum(1 for r in rows if r["status"] == "assigned"),
+            "delivered": len(delivered),
+            "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
+            "avg_wait_pos": avg("wait_pos_minutes"),
+            "avg_wait_deliver": avg("wait_deliver_minutes"),
+            "avg_total": avg("total_minutes"),
+            "max_total": worst("total_minutes"),
+            "under_5": sum(1 for r in delivered
+                           if r["total_minutes"] is not None and r["total_minutes"] <= 5),
+            "over_sla": sum(1 for r in delivered
+                            if r["total_minutes"] is not None and r["total_minutes"] > SLA_MINUTES),
+            "no_pos_delivered": sum(1 for r in rows if r["no_pos_warning"]),
+            "attention": sum(1 for r in rows if r["attention"]),
+            "by_pos": by_pos,
+            "by_scanner": by_scanner,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/stats/export.csv")
+def export_csv(me: dict = Depends(current_staff)):
+    require_role(me, ROLE_MANAGER, ROLE_BACKSTORE)
+    conn = get_db()
+    try:
+        rows = fetch(conn, "r.store_id=? AND r.day_key=?", (me["store_id"], today_key()), "r.seq")
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["REF", "SO_NUMBER", "STATUS", "POS", "SCANNED_AT", "SCANNED_BY",
+                    "CLAIMED_AT", "POS_CLAIMED_BY", "DELIVERED_AT", "DELIVERED_BY",
+                    "WAIT_POS_MIN", "WAIT_DELIVER_MIN", "TOTAL_MIN",
+                    "CANCELLED_AT", "REASON", "NOTE"])
+        for r in rows:
+            w.writerow([
+                r["ref_no"], r["so_number"], r["status"], r["pos_number"] or "",
+                r["scanned_at"], r["scanned_by_name"] or "",
+                r["claimed_at"] or "", r["claimed_by_name"] or "",
+                r["delivered_at"] or "", r["delivered_by_name"] or "",
+                r["wait_pos_minutes"] if r["wait_pos_minutes"] is not None else "",
+                r["wait_deliver_minutes"] if r["wait_deliver_minutes"] is not None else "",
+                r["total_minutes"] if r["total_minutes"] is not None else "",
+                r["cancelled_at"] or "", r["cancel_reason"] or "", r["note"] or "",
+            ])
+        buf.seek(0)
+        fname = f"qms_{me['store_code']}_{today_key()}.csv"
+        return StreamingResponse(
+            iter([buf.getvalue()]), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/staff")
+def list_staff(me: dict = Depends(current_staff)):
+    require_role(me, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, code, role, pos_number, is_active FROM staff "
+            "WHERE store_id=? ORDER BY id", (me["store_id"],)
+        ).fetchall()
+        return {"staff": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+# ---- POS counter management ------------------------------------------------
+MAX_POS = int(os.environ.get("QMS_MAX_POS", "20"))
+
+
+def _pos_status(conn, store_id: int) -> list[dict]:
+    day = today_key()
+    n = pos_count_of(conn, store_id)
+    out = []
+    for i in range(1, n + 1):
+        row = conn.execute(
+            "SELECT id, name, is_active FROM staff WHERE role='pos' AND pos_number=?", (i,)
+        ).fetchone()
+        used = conn.execute(
+            "SELECT COUNT(*) c FROM so_requests WHERE store_id=? AND day_key=? AND pos_number=?",
+            (store_id, day, i),
+        ).fetchone()["c"]
+        out.append({
+            "pos_number": i,
+            "label": f"POS {i}",
+            "staff_id": row["id"] if row else None,
+            "is_active": bool(row["is_active"]) if row else False,
+            "today_count": used,
+        })
+    return out
+
+
+@app.get("/api/v1/pos")
+def list_pos(me: dict = Depends(current_staff)):
+    require_role(me, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        return {"pos_count": pos_count_of(conn, me["store_id"]),
+                "max_pos": MAX_POS,
+                "counters": _pos_status(conn, me["store_id"])}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/pos/add")
+def add_pos(me: dict = Depends(current_staff)):
+    """Add the next counter (P5, P6, ...) and switch it on immediately."""
+    require_role(me, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        sid = me["store_id"]
+        n = pos_count_of(conn, sid)
+        if n >= MAX_POS:
+            raise HTTPException(400, f"Maximum {MAX_POS} POS counters")
+        new_n = n + 1
+        row = conn.execute(
+            "SELECT id FROM staff WHERE role='pos' AND pos_number=?", (new_n,)
+        ).fetchone()
+        if row:
+            conn.execute("UPDATE staff SET is_active=1 WHERE id=?", (row["id"],))
+        else:
+            conn.execute(
+                "INSERT INTO staff (store_id, name, code, role, pos_number) VALUES (?,?,?,?,?)",
+                (sid, f"POS {new_n}", f"pos{new_n}", ROLE_POS, new_n),
+            )
+        conn.execute("UPDATE stores SET pos_count=? WHERE id=?", (new_n, sid))
+        conn.commit()
+        return {"ok": True, "pos_count": new_n, "added": new_n}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/pos/remove")
+def remove_pos(me: dict = Depends(current_staff)):
+    """
+    Switch off the highest counter. Refused when it is still in use today, and
+    the staff row is deactivated rather than deleted so the audit trail survives.
+    """
+    require_role(me, ROLE_MANAGER)
+    conn = get_db()
+    try:
+        sid = me["store_id"]
+        n = pos_count_of(conn, sid)
+        if n <= 1:
+            raise HTTPException(400, "At least one POS counter is required")
+        used = conn.execute(
+            "SELECT COUNT(*) c FROM so_requests WHERE store_id=? AND day_key=? AND pos_number=?",
+            (sid, today_key(), n),
+        ).fetchone()["c"]
+        if used:
+            raise HTTPException(
+                409, f"POS {n} already handled {used} SO today — cannot remove it yet"
+            )
+        conn.execute(
+            "UPDATE staff SET is_active=0 WHERE role='pos' AND pos_number=?", (n,)
+        )
+        conn.execute("UPDATE stores SET pos_count=? WHERE id=?", (n - 1, sid))
+        conn.commit()
+        return {"ok": True, "pos_count": n - 1, "removed": n}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/v1/staff/{sid}")
+def rename_staff(sid: int, req: dict, me: dict = Depends(current_staff)):
+    """Put a real name on a role so the audit log reads like people, not 'POS 3'."""
+    require_role(me, ROLE_MANAGER)
+    name = (req.get("name") or "").strip()
+    if not name or len(name) > 60:
+        raise HTTPException(400, "Name required (max 60 chars)")
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE staff SET name=? WHERE id=? AND store_id=?", (name, sid, me["store_id"])
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Staff not found")
+        conn.commit()
+        return {"ok": True, "id": sid, "name": name}
+    finally:
+        conn.close()
+
+
+# ---- setup helpers --------------------------------------------------------
+def _lan_addresses() -> list[str]:
+    """Every non-loopback IPv4 address this box answers on."""
+    out: list[str] = []
+    try:
+        import socket
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in out:
+                out.append(ip)
+    except Exception:
+        pass
+    # fall back to parsing the routing table (works even when the hostname
+    # resolves to nothing useful, which is common on minimal Linux installs)
+    try:
+        import subprocess
+        res = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                             capture_output=True, text=True, timeout=5)
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and "/" in parts[3]:
+                ip = parts[3].split("/")[0]
+                if ip not in out:
+                    out.append(ip)
+    except Exception:
+        pass
+    return out
+
+
+@app.get("/api/network")
+def network(request: Request):
+    """Addresses staff can use to reach this box. No auth — needed on the setup screen."""
+    port = request.url.port or int(os.environ.get("QMS_PORT", "8099"))
+    import socket
+    host = socket.gethostname()
+    lan = _lan_addresses()
+    conn = get_db()
+    try:
+        store = conn.execute("SELECT id, code, name FROM stores ORDER BY id LIMIT 1").fetchone()
+        n_pos = pos_count_of(conn, store["id"]) if store else POS_COUNT
+        store_code = store["code"] if store else STORE_CODE
+        store_name = store["name"] if store else STORE_NAME
+    finally:
+        conn.close()
+    return {
+        "hostname": host,
+        "port": port,
+        "localhost_url": f"http://localhost:{port}",
+        "localhost_note": "This machine only. The camera works here (secure context).",
+        "lan_urls": [f"http://{ip}:{port}" for ip in lan],
+        "lan_note": "Any device on the store wifi. No camera — use Manual Entry, or put HTTPS in front.",
+        "store_code": store_code,
+        "store_name": store_name,
+        "pos_count": n_pos,
+        "version": app.version,
+        "time": iso(now()),
+    }
+
+
+@app.get("/setup/qr.png")
+def setup_qr(u: str = Query(...), size: int = Query(260, ge=120, le=600)):
+    """QR PNG for an address, so staff can just scan it to open the app."""
+    try:
+        import qrcode
+        from io import BytesIO
+        img = qrcode.make(u, box_size=10, border=2)
+        img = img.resize((size, size))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=3600"})
+    except Exception as e:  # qrcode/Pillow missing — don't break the setup page
+        raise HTTPException(500, f"QR unavailable: {e}")
+
+
+@app.get("/api/health")
+def health():
+    conn = get_db()
+    try:
+        n = conn.execute("SELECT COUNT(*) c FROM so_requests").fetchone()["c"]
+        store = conn.execute("SELECT id, code FROM stores ORDER BY id LIMIT 1").fetchone()
+        n_pos = pos_count_of(conn, store["id"]) if store else POS_COUNT
+    except Exception:
+        n = -1
+        n_pos = POS_COUNT
+    finally:
+        conn.close()
+    return {
+        "ok": True, "time": iso(now()), "tz": str(TZ), "store": STORE_CODE,
+        "requests_total": n, "sla_minutes": SLA_MINUTES,
+        "stale_minutes": STALE_MINUTES, "pos_count": n_pos,
+        "version": app.version,
+    }
+
+
+# ---- static (MUST be last) ------------------------------------------------
+@app.get("/admin")
+def redirect_admin():
+    return RedirectResponse(url="/")
+
+
+app.mount("/", StaticFiles(directory=os.path.join(BASE_DIR, "static"), html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("QMS_PORT", "8099")))

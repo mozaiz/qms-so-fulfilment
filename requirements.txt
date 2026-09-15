@@ -1,0 +1,10 @@
+# QMS — SO Fulfilment
+# Runtime dependencies only. Keep this list short: every entry is something a
+# store box has to download on install day.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+# Only needed for the setup page QR code (so staff can scan the address instead
+# of typing an IP). The app degrades gracefully if Pillow is missing.
+qrcode>=7.4
+pillow>=10.0

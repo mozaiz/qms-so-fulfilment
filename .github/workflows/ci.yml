@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test suite (incl. concurrent claim)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: |
+          python -m compileall -q app.py seed_demo.py test_flow.py make_qr_card.py
+          python -c "import ast,sys; ast.parse(open('app.py').read())"
+
+      # Start the server, seed a known state, then drive the real HTTP API.
+      # The important assertion is the concurrent-claim one: fire 4 simultaneous
+      # claims at the same SO and require exactly one winner. That invariant is
+      # the reason this app uses SQLite instead of a CSV file.
+      - name: Run API test suite
+        run: |
+          set -e
+          uvicorn app:app --host 127.0.0.1 --port 8099 > /tmp/qms.log 2>&1 &
+          SERVER=$!
+          trap 'kill $SERVER 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8099/api/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8099/api/health | tee /dev/stderr
+
+          python seed_demo.py
+          python test_flow.py http://127.0.0.1:8099
+
+      - name: Server log on failure
+        if: failure()
+        run: tail -60 /tmp/qms.log || true
+
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Server starts with a clean database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Fresh-database boot
+        run: |
+          set -e
+          export QMS_DB="$RUNNER_TEMP/fresh.db"
+          uvicorn app:app --host 127.0.0.1 --port 8111 > /tmp/smoke.log 2>&1 &
+          SERVER=$!
+          trap 'kill $SERVER 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8111/api/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8111/api/health
+          curl -sf http://127.0.0.1:8111/api/network
+          # every role must be able to sign in on a brand-new database
+          for role in scanner backstore manager; do
+            curl -sf -X POST http://127.0.0.1:8111/api/login \
+              -H 'Content-Type: application/json' -d "{\"role\":\"$role\"}" >/dev/null
+          done
+          for n in 1 2 3 4; do
+            curl -sf -X POST http://127.0.0.1:8111/api/login \
+              -H 'Content-Type: application/json' \
+              -d "{\"role\":\"pos\",\"pos_number\":$n}" >/dev/null
+          done
+          echo "all roles signed in on a fresh database"

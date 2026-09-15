@@ -1,0 +1,25 @@
+# QMS — one command:
+#   docker compose up -d
+#
+# Then open http://localhost:8099 on this machine.
+# NOTE: not exercised in this project's environment (no Docker on the dev box).
+services:
+  qms:
+    build: .
+    image: qms:latest
+    container_name: qms
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    environment:
+      QMS_STORE_CODE: "MCSQ01"
+      QMS_STORE_NAME: "Machines Store"
+      QMS_SLA_MIN: "10"
+      QMS_STALE_MIN: "15"
+      QMS_POS_COUNT: "4"
+      QMS_TZ: "Asia/Kuala_Lumpur"
+    volumes:
+      - qms-data:/data
+
+volumes:
+  qms-data:

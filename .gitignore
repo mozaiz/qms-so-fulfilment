@@ -1,0 +1,20 @@
+# --- databases: never commit. patient data, one file, easy to leak by accident
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+*.db.bak.*
+
+# --- runtime / install artefacts -------------------------------------------
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+qms.env
+
+# --- generated output -------------------------------------------------------
+screens/
+qr_card_*.png
+qr_card_*.pdf
+test_barcodes.png
+*.log

@@ -149,8 +149,8 @@ the daily flow.
 | Role | Tabs | Can do |
 |---|---|---|
 | **Scanner** | Scan · My Scans | Scan SOs, see what they scanned, cancel their own |
-| **P1–P4** | Claim SO · My SOs | Claim an SO to their counter, release it again |
-| **Backstore** | To Deliver · Completed | Tick delivered, see stats, export |
+| **P1–P4** | Queue · My SOs | Work the live queue: claim an SO, complete it, release it |
+| **Backstore** | To Deliver · Completed | Deliver to the POS, tick it off, see stats, export |
 | **Manager** | All · Stats · Setup | Everything, plus POS counters |
 
 Roles are enforced **server-side** — a POS calling the scan endpoint gets `403`,
@@ -170,6 +170,27 @@ deactivated rather than deleted, so the audit trail survives.
 `scanned` → `assigned` → `delivered`, or `cancelled`
 
 Shown to staff as **WAITING / CLAIMED / DELIVERED / CANCELLED**.
+
+### An SO does not leave the queue until it is complete
+
+Customers are called out by SO number, so the queue has to be the honest list of
+who is still waiting. The **Queue** view therefore holds *every* SO that has not
+been completed — claimed ones included, just badged with the POS that has it. An SO
+disappears the moment it is completed, and not before.
+
+Nothing is ever deleted. Every view is a filter over the same rows, so "the SO
+vanished" can only ever mean "someone completed it".
+
+### Who can complete an SO
+
+Normally the backstore ticks it off as they hand the item over. **The POS that
+claimed it can complete it too** — whoever actually finishes the handover closes
+the entry, because waiting on the other role would leave a customer called but
+never cleared. The database still enforces the boundary:
+
+- the owning POS → allowed
+- a different POS → `403`
+- an SO no POS ever claimed → `403` for a POS (backstore may still deliver it)
 
 Three things turn a card **red** — flagged, never auto-actioned:
 
@@ -211,10 +232,10 @@ POST   /api/login                     {role, pos_number?}
 POST   /api/logout
 GET    /api/me
 POST   /api/v1/requests/scan          {so_number, note?}   scanner, manager
-GET    /api/v1/requests?view=today|all|mine|unclaimed|todeliver
+GET    /api/v1/requests?view=today|all|mine|queue|unclaimed|todeliver
 POST   /api/v1/requests/{id}/claim    atomic compare-and-swap   pos, manager
 POST   /api/v1/requests/{id}/release  undo a claim              pos, manager
-POST   /api/v1/requests/{id}/deliver  tick handed over          backstore, manager
+POST   /api/v1/requests/{id}/deliver  complete the handover     backstore, manager, owning pos
 POST   /api/v1/requests/{id}/cancel   {reason?}                 scanner, manager
 GET    /api/v1/requests/{id}/events   audit trail
 GET    /api/v1/stats/today
@@ -244,6 +265,13 @@ standing there. Values are upper-cased and whitespace-stripped server-side, beca
 **Dedupe, three layers** — same SO still open returns the existing row; same SO
 finished within `QMS_DEDUPE_MIN` is suppressed as an accidental re-scan; anything
 else creates a new job.
+
+**Copy the SO number** — every card has a COPY button, because staff read the SO
+number out loud to call the customer. It is deliberately layered: `navigator.clipboard`
+in a secure context, falling back to a hidden textarea + `execCommand("copy")` over
+plain HTTP, because POS screens open this on the store LAN where
+`navigator.clipboard` does not exist at all. Tested both ways — the copy lands in the
+clipboard on `http://192.168.x.x`.
 
 **Ordering** — work lists are pure FIFO on the sequence. With one backstore person,
 "who has waited longest" is the only ordering that matters, and a red flag is always
@@ -301,3 +329,8 @@ on every push.
   the user is mid-transaction with a customer.
 - **Never put an unquoted value with spaces in `qms.env`.** `QMS_STORE_NAME=Test Outlet`
   breaks on `source` and in systemd's `EnvironmentFile`. Quote it.
+- **`document.execCommand("copy")` needs a real user gesture.** A synthetic
+  `element.click()` from an automated test returns `false` and makes the clipboard
+  fallback look broken when it works fine under a real tap. Drive it with a trusted
+  mouse event (CDP `Input.dispatchMouseEvent`) before believing a copy button is
+  broken.

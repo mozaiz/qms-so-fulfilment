@@ -156,6 +156,40 @@ for view, tok, who in (("unclaimed", T["pos1"], "pos"),
     st, d = call("GET", "/api/v1/requests?view=" + view, None, tok)
     check("view %-10s -> %d rows" % (view, len(d.get("requests", []))), st == 200, st)
 
+print("\n== live queue keeps claimed SOs (they are called by SO number) ==")
+st, q1 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888001"}, T["scanner"])
+qid = q1["id"]
+st, qv = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
+check("queue view reachable", st == 200, st)
+in_q = [r for r in qv["requests"] if r["id"] == qid]
+check("unclaimed SO is in the queue", len(in_q) == 1 and in_q[0]["status"] == "scanned")
+
+st, _ = call("POST", "/api/v1/requests/%d/claim" % qid, None, T["pos1"])
+st, qv2 = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
+in_q2 = [r for r in qv2["requests"] if r["id"] == qid]
+check("claimed SO STAYS in the queue", len(in_q2) == 1, "%d rows" % len(in_q2))
+check("...and shows which POS has it", in_q2 and in_q2[0]["pos_number"] == 1)
+
+st, _ = call("POST", "/api/v1/requests/%d/deliver" % qid, None, T["backstore"])
+st, qv3 = call("GET", "/api/v1/requests?view=queue", None, T["pos1"])
+check("completed SO leaves the queue",
+      not [r for r in qv3["requests"] if r["id"] == qid])
+
+print("\n== POS can complete its own SO ==")
+st, p1 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888002"}, T["scanner"])
+pid = p1["id"]
+call("POST", "/api/v1/requests/%d/claim" % pid, None, T["pos2"])
+st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos3"])
+check("another POS cannot complete it -> 403", st == 403, st)
+st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos2"])
+check("the owning POS can complete it", st == 200 and d["status"] == "delivered", st)
+st, d = call("POST", "/api/v1/requests/%d/deliver" % pid, None, T["pos2"])
+check("completing twice -> 409", st == 409, st)
+
+st, p2 = call("POST", "/api/v1/requests/scan", {"so_number": "MACSO26-00888003"}, T["scanner"])
+st, d = call("POST", "/api/v1/requests/%d/deliver" % p2["id"], None, T["pos1"])
+check("POS cannot complete an SO nobody claimed -> 403", st == 403, st)
+
 print("\n== audit trail ==")
 st, d = call("GET", "/api/v1/requests/%d/events" % RID, None, T["backstore"])
 names = [e["event"] for e in d["events"]]

@@ -88,8 +88,12 @@ This single sheet is the whole training. Staff scan the QR, tap their role, done
 | Role | Their device | What they do |
 |---|---|---|
 | **SCANNER** | The QMS computer itself | Scan the customer's SO barcode |
-| **POS 1 – 4** | Any phone/tablet/POS screen on the wifi | Tap the SO to claim it to their counter |
+| **POS 1 – 4** | Any phone/tablet/POS screen on the wifi | Work the queue: claim an SO, complete it when the customer has it |
 | **BACKSTORE** | Any phone/tablet on the wifi | See "DELIVER TO POS 3", walk it over, tick it |
+
+**The queue is the list you call customers from.** An SO stays in it — claimed or
+not — until someone marks it complete. Use **COPY** on a card to copy the SO number
+if you need to read it out or paste it somewhere.
 
 ### ⚠️ The one thing that trips people up
 

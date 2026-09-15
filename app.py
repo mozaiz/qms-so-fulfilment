@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.4.0", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:
@@ -546,8 +546,9 @@ def list_requests(view: str = Query("today"), me: dict = Depends(current_staff))
       today      — everything for today (default; every role polls this)
       all        — everything, newest first
       mine       — scanner: what I scanned / pos: what my POS claimed
-      unclaimed  — status 'scanned', waiting for a POS to claim  (POS screen)
-      todeliver  — status 'assigned', waiting for backstore      (backstore screen)
+      queue      — every SO not yet completed, in arrival order (the live queue)
+      unclaimed  — status 'scanned', waiting for a POS to claim
+      todeliver  — assigned first, then anything still unclaimed (backstore screen)
     """
     conn = get_db()
     try:
@@ -556,6 +557,13 @@ def list_requests(view: str = Query("today"), me: dict = Depends(current_staff))
 
         if view == "unclaimed":
             rows = fetch(conn, "r.store_id=? AND r.day_key=? AND r.status='scanned'",
+                         (sid, day), "r.seq")
+        elif view == "queue":
+            # The live queue: every SO still awaiting completion, in the order it
+            # arrived. Claimed SOs stay in this list — staff call customers by SO
+            # number, so an SO must not vanish from the queue until it is done.
+            rows = fetch(conn,
+                         "r.store_id=? AND r.day_key=? AND r.status IN ('scanned','assigned')",
                          (sid, day), "r.seq")
         elif view == "todeliver":
             # assigned first (the real work), then SOs never claimed by any POS so
@@ -660,11 +668,19 @@ def release(rid: int, me: dict = Depends(current_staff)):
 
 @app.post("/api/v1/requests/{rid}/deliver")
 def deliver(rid: int, me: dict = Depends(current_staff)):
-    """Backstore ticks: item handed over at the front."""
-    require_role(me, ROLE_BACKSTORE, ROLE_MANAGER)
+    """
+    Complete an SO. Normally the backstore ticks it as they hand the item over,
+    but the POS that claimed it can complete it too — whoever actually finishes
+    the handover should be able to close the queue entry, and waiting on the
+    other role would leave a customer called but never cleared.
+    """
+    require_role(me, ROLE_BACKSTORE, ROLE_MANAGER, ROLE_POS)
     conn = get_db()
     try:
         row = _get(conn, rid, me["store_id"])
+        if me["role"] == ROLE_POS and row["pos_number"] != me["pos_number"]:
+            owner = f"POS {row['pos_number']}" if row["pos_number"] else "no POS"
+            raise HTTPException(403, f"This SO belongs to {owner} — you cannot complete it")
         if row["status"] not in ("scanned", "assigned"):
             raise HTTPException(409, f"{row['ref_no']} is '{row['status']}' — cannot mark delivered")
 

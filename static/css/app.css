@@ -273,3 +273,19 @@ body{
   background:#fff;border-radius:12px;padding:12px
 }
 .qr{width:200px;height:200px;display:block}
+
+/* ================= live queue: SO number + copy ================= */
+.so-numrow{display:flex;align-items:center;gap:10px;margin-top:6px}
+.so-numrow .so-num{margin-top:0;flex:1;min-width:0}
+
+/* make the number long-pressable on phones, in case copy is unavailable */
+.so-num{-webkit-user-select:text;user-select:text}
+
+.btn-copy{
+  flex:0 0 auto;background:#21262d;border:1px solid var(--line);color:var(--dim);
+  font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.9px;
+  padding:8px 11px;border-radius:9px;cursor:pointer;transition:background .15s,border-color .15s;
+  line-height:1
+}
+.btn-copy:active{filter:brightness(.85)}
+.btn-copy.copied{background:#12351d;border-color:var(--ok);color:#56d364}

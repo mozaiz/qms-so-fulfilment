@@ -17,7 +17,7 @@
   var ROLE_TABS = {
     scanner: [{ k: "scan", i: "📷", t: "Scan" },
               { k: "mine", i: "📋", t: "My Scans" }],
-    pos:     [{ k: "unclaimed", i: "🎯", t: "Claim SO" },
+    pos:     [{ k: "queue", i: "🎯", t: "Queue" },
               { k: "mine", i: "📋", t: "My SOs" }],
     backstore: [{ k: "todeliver", i: "🚚", t: "To Deliver" },
                 { k: "done", i: "✅", t: "Completed" }],
@@ -28,6 +28,7 @@
 
   var TITLES = {
     mine: "My Scans",
+    queue: "Live Queue",
     unclaimed: "Unclaimed SOs",
     todeliver: "To Deliver to POS",
     done: "Completed",
@@ -36,6 +37,7 @@
 
   var EMPTY = {
     mine: "Nothing yet.<br>Scan a customer barcode to start.",
+    queue: "The queue is empty.<br>Every SO has been completed.",
     unclaimed: "No SOs waiting.<br>Every SO has been claimed.",
     todeliver: "Nothing to deliver.<br>All caught up.",
     done: "No completed SOs yet today.",
@@ -48,7 +50,7 @@
     tab: "scan", prevTab: "scan",
     scanning: false, reader: null, track: null, torchOn: false,
     lastCode: null, lastCodeAt: 0, submitting: false,
-    prevStatus: {}, seenIds: {}, flashUntil: {},
+    prevStatus: {}, seenIds: {}, flashUntil: {}, rowById: {},
     pollTimer: null, net: null,
   };
 
@@ -67,6 +69,49 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  function copyText(btn, text) {
+    if (!text) return;
+
+    function legacy(t) {
+      var ta = document.createElement("textarea");
+      ta.value = t;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, t.length);   // iOS needs both, or it copies nothing
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+
+    function done() {
+      if (btn) {
+        var old = btn.textContent;
+        btn.textContent = "COPIED";
+        btn.classList.add("copied");
+        setTimeout(function () { btn.textContent = old; btn.classList.remove("copied"); }, 1400);
+      }
+      toast("SO number copied", "ok", 1800);
+      buzz(30);
+    }
+
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done).catch(function () {
+        if (legacy(text)) done();
+        else toast("Could not copy — long-press the number instead", "warn", 4000);
+      });
+    } else if (legacy(text)) {
+      done();
+    } else {
+      toast("Could not copy — long-press the number instead", "warn", 4000);
+    }
   }
 
   function beep(freq, dur) {
@@ -304,7 +349,7 @@
 
   // ------------------------------------------------------------ navigation
   var VIEW_OF_TAB = {
-    scan: null, mine: "mine", unclaimed: "unclaimed",
+    scan: null, mine: "mine", queue: "queue", unclaimed: "unclaimed",
     todeliver: "todeliver", done: "today", today: "today",
     stats: null, setup: null,
   };
@@ -332,9 +377,10 @@
   function setBoardTitle(tab) {
     var t = TITLES[tab] || "Board";
     if (tab === "mine" && state.staff.role === "pos") t = "My SOs";
-    if (tab === "unclaimed" && state.staff.role === "pos") t = "Claim for POS " + state.staff.pos_number;
+    if (tab === "queue" && state.staff.role === "pos") t = "Live Queue — POS " + state.staff.pos_number;
     $("boardTitle").textContent = t;
-    var lbl = { mine: "Mine", unclaimed: "Unclaimed", todeliver: "To Deliver", done: "Completed", today: "Open" };
+    var lbl = { mine: "Mine", queue: "In Queue", unclaimed: "Unclaimed",
+                todeliver: "To Deliver", done: "Completed", today: "Open" };
     $("bOpenLbl").textContent = lbl[tab] || "Open";
   }
 
@@ -624,7 +670,9 @@
     });
 
     var t0 = Date.now();
+    state.rowById = {};
     sorted.forEach(function (r) {
+      state.rowById[r.id] = r;
       if (state.seenIds[r.id] && state.prevStatus[r.id] && state.prevStatus[r.id] !== r.status) {
         state.flashUntil[r.id] = t0 + FLASH_MS;
       }
@@ -686,6 +734,10 @@
                   '">Mark Delivered (no POS)</button>');
       }
       if (role === "pos" && r.status === "assigned" && r.pos_number === state.staff.pos_number) {
+        // Whoever actually finishes the handover closes the queue entry — waiting
+        // on the other role would leave a customer called but never cleared.
+        btns.push('<button class="btn btn-done" data-act="deliver" data-id="' + r.id +
+                  '">MARK COMPLETE</button>');
         btns.push('<button class="btn btn-dark" data-act="release" data-id="' + r.id +
                   '">Release</button>');
       }
@@ -703,7 +755,10 @@
         (r.pos_number ? '<span class="badge pos">P' + r.pos_number + "</span> " : "") +
         '<span class="so-time ' + timeCls + '">' + timeVal + "</span></div>" +
       "</div>" +
-      '<div class="so-num">' + esc(r.so_number) + "</div>" +
+      '<div class="so-numrow">' +
+        '<div class="so-num">' + esc(r.so_number) + "</div>" +
+        '<button class="btn-copy" data-copy="' + r.id + '" aria-label="Copy SO number">COPY</button>' +
+      "</div>" +
       dest + attn +
       '<div class="so-meta">' + meta + "</div>" + actions +
       "</div>";
@@ -716,7 +771,8 @@
       buzz(60);
       if (what === "claim") { toast("Claimed for POS " + r.pos_number + " ✓", "ok"); beep(1000, 0.12); }
       else if (what === "deliver") {
-        toast(r.warning ? "Delivered — " + r.warning : "Marked delivered ✓", r.warning ? "warn" : "ok", 5000);
+        var who = state.staff.role === "pos" ? "Marked complete ✓" : "Marked delivered ✓";
+        toast(r.warning ? "Delivered — " + r.warning : who, r.warning ? "warn" : "ok", 5000);
         beep(1000, 0.14);
       } else if (what === "release") toast("SO released back to the pool", "warn");
       else toast("Done", "ok");
@@ -792,6 +848,12 @@
     $("refreshBoard").addEventListener("click", function () { loadBoard(); });
 
     $("boardList").addEventListener("click", function (e) {
+      var copy = e.target.closest("button[data-copy]");
+      if (copy) {
+        var row = state.rowById[copy.dataset.copy];
+        if (row) copyText(copy, row.so_number);
+        return;
+      }
       var btn = e.target.closest("button[data-act]");
       if (btn) act(btn.dataset.id, btn.dataset.act);
     });

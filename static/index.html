@@ -14,6 +14,12 @@
 </head>
 <body>
 
+<!-- Shown on every screen when the loaded app is older than the running server. -->
+<div id="staleBar" class="stale-bar hidden">
+  ⚠ <span id="staleMsg"></span>
+  <button id="reloadBtn" class="stale-btn">RELOAD</button>
+</div>
+
 <!-- ============ LOGIN / ROLE PICKER ============ -->
 <section id="screen-login" class="screen">
   <div class="login-wrap">
@@ -32,6 +38,8 @@
       <button id="setupLink" class="role-mini">ℹ Setup &amp; Addresses</button>
       <button id="managerLink" class="role-mini">⚙ Manager</button>
     </div>
+
+    <p class="ver-line" id="verLine">…</p>
   </div>
 </section>
 
@@ -42,7 +50,10 @@
       <div class="tb-title">Scan Customer SO</div>
       <div class="tb-sub" id="scanWho">—</div>
     </div>
-    <button class="btn btn-ghost btn-sm switch-role">Switch Role</button>
+    <div class="row-inline">
+      <span class="ver-pill" data-ver>v—</span>
+      <button class="btn btn-ghost btn-sm switch-role">Switch Role</button>
+    </div>
   </header>
 
   <div class="offline-bar hidden" id="offlineBar">
@@ -87,6 +98,7 @@
       <div class="tb-sub" id="boardWho">—</div>
     </div>
     <div class="row-inline">
+      <span class="ver-pill" data-ver>v—</span>
       <span id="liveDot" class="live-dot" title="Live"></span>
       <button id="refreshBoard" class="btn btn-ghost btn-sm">↻</button>
       <button class="btn btn-ghost btn-sm switch-role">Switch</button>
@@ -150,7 +162,8 @@
     <div class="sbox wide">
       <div class="sbox-l">About</div>
       <div class="bar-row"><span>Store code</span><b id="abStore">—</b></div>
-      <div class="bar-row"><span>Version</span><b id="abVersion">—</b></div>
+      <div class="bar-row"><span>Server version</span><b id="abVersion">—</b></div>
+      <div class="bar-row"><span>App version</span><b id="abAppVer">—</b></div>
       <div class="bar-row"><span>Server time</span><b id="abTime">—</b></div>
       <div class="bar-row"><span>POS counters</span><b id="abPos">—</b></div>
     </div>
@@ -164,7 +177,10 @@
       <div class="tb-title">Statistics</div>
       <div class="tb-sub" id="statsDay">—</div>
     </div>
-    <button class="btn btn-ghost btn-sm switch-role">Switch</button>
+    <div class="row-inline">
+      <span class="ver-pill" data-ver>v—</span>
+      <button class="btn btn-ghost btn-sm switch-role">Switch</button>
+    </div>
   </header>
   <div id="statsBody" class="stats-body"></div>
   <a id="exportLink" class="btn btn-dark btn-block mt12" href="#" download>⬇ Export CSV</a>

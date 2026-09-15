@@ -2,6 +2,11 @@
 (function () {
   "use strict";
 
+  // Bump this together with CACHE in service-worker.js on every deploy.
+  // The UI compares it against the server's version and offers a reload when a
+  // phone is still running an older build.
+  var APP_VER = "0.5.0";
+
   var POLL_MS = 5000;       // quiet auto-refresh (staff can also hit the refresh button)
   var COOLDOWN_MS = 2500;   // ignore the same barcode re-read within this window
   var FLASH_MS = 12000;     // how long a card stays highlighted after it changes
@@ -56,7 +61,7 @@
     scanning: false, reader: null, track: null, torchOn: false,
     lastCode: null, lastCodeAt: 0, submitting: false,
     prevStatus: {}, seenIds: {}, flashUntil: {}, rowById: {},
-    pollTimer: null, net: null,
+    pollTimer: null, net: null, serverVer: null,
   };
 
   function $(id) { return document.getElementById(id); }
@@ -244,6 +249,52 @@
   async function loadNetwork() {
     try { state.net = await pub("/api/network"); } catch (e) { state.net = null; }
     if (state.net) state.posCount = state.net.pos_count || state.posCount;
+    if (state.net && state.net.version) state.serverVer = state.net.version;
+    try {
+      var h = await pub("/api/health");
+      if (h && h.version) state.serverVer = h.version;
+    } catch (e) {}
+    renderVersions();
+  }
+
+  // Wherever the version is shown, and the warning when the loaded app is older
+  // than the running server. This is the difference between "the fix didn't work"
+  // and "your phone is running yesterday's build".
+  function renderVersions() {
+    var app = "v" + APP_VER;
+    var srv = state.serverVer ? "v" + state.serverVer : "?";
+
+    document.querySelectorAll("[data-ver]").forEach(function (el) { el.textContent = app; });
+
+    var line = $("verLine");
+    if (line) line.textContent = "App " + app + "  ·  Server " + srv;
+
+    var ab = $("abAppVer");
+    if (ab) ab.textContent = app;
+
+    var stale = !!(state.serverVer && state.serverVer !== APP_VER);
+    var bar = $("staleBar");
+    if (bar) {
+      if (stale) {
+        $("staleMsg").textContent =
+          "This app is " + app + " but the server is running " + srv + " — you are on an old build.";
+        bar.classList.remove("hidden");
+      } else {
+        bar.classList.add("hidden");
+      }
+    }
+  }
+
+  // Unregister the worker and drop every cache, then reload. Without this a
+  // phone can stay pinned to an old build indefinitely.
+  async function hardReload() {
+    try {
+      var regs = await navigator.serviceWorker.getRegistrations();
+      for (var i = 0; i < regs.length; i++) await regs[i].unregister();
+      var keys = await caches.keys();
+      for (var j = 0; j < keys.length; j++) await caches.delete(keys[j]);
+    } catch (e) {}
+    location.reload();
   }
 
   function buildRoleGrid() {
@@ -750,11 +801,10 @@
       }
       if (role === "pos" && r.pos_number === state.staff.pos_number &&
           (r.status === "assigned" || r.status === "delivered")) {
-        // Only the counter holding the item closes it: backstore said "handed
-        // over", POS confirms "customer has it". Big and green once the stock is
-        // physically at the counter, so the normal next action is obvious.
-        var primary = r.status === "delivered" ? "btn-done btn-big" : "btn-dark";
-        btns.push('<button class="btn ' + primary + '" data-act="complete" data-id="' + r.id +
+        // Only the counter holding the item closes it. Always big and green so
+        // it cannot be missed — the badge above already says whether the stock
+        // has physically arrived, so the button does not need to shout twice.
+        btns.push('<button class="btn btn-done btn-big" data-act="complete" data-id="' + r.id +
                   '">MARK COMPLETE</button>');
       }
       if (role === "pos" && r.status === "assigned" && r.pos_number === state.staff.pos_number) {
@@ -899,11 +949,27 @@
 
   function boot() {
     wire();
+    renderVersions();
+
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/service-worker.js").catch(function () {});
+      // when a newer build takes over, reload once so the new code is actually
+      // running instead of sitting behind the old page
+      navigator.serviceWorker.addEventListener("controllerchange", function () {
+        if (state._reloaded) return;
+        state._reloaded = true;
+        location.reload();
+      });
     }
+
+    var rb = $("reloadBtn");
+    if (rb) rb.addEventListener("click", hardReload);
+
     loadNetwork().then(function () { restoreSession(); });
-    setInterval(function () { if (state.token) refreshBars(); }, 15000);
+    setInterval(function () {
+      if (state.token) refreshBars();
+      if (state.serverVer) renderVersions();
+    }, 15000);
   }
 
   document.addEventListener("DOMContentLoaded", boot);

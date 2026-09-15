@@ -11,10 +11,10 @@ D = "/home/mozaiz/workspace/qms/screens"
 
 STRIPS = {
     "handover": [
-        ("1_pos_queue.png", "POS — QUEUE (unclaimed, oldest first)"),
-        ("2_pos_mine.png", "POS — MY SOs (Pending Stock)"),
-        ("4_pos2_delivered.png", "POS — MY SOs (Delivered, ready)"),
-        ("6_atcounter.png", "BACKSTORE — AT COUNTER"),
+        ("1_login.png", "SIGN-IN — shows app + server version"),
+        ("2_pending_stock.png", "POS — MY SOs · Pending Stock (MARK COMPLETE already live)"),
+        ("3_delivered.png", "POS — MY SOs · Delivered (item at the counter)"),
+        ("4_stats.png", "MANAGER — version pill in the topbar"),
     ],
 }
 

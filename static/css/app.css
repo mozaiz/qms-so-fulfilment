@@ -297,3 +297,29 @@ body{
 /* delivered = the good news state: the item is physically at this counter */
 .so-dest.atcounter{color:var(--ok);font-size:17px;font-weight:800}
 .so-dest.done{color:var(--dim);font-size:15px}
+
+/* ================= version + stale-build warning ================= */
+.ver-pill{
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;
+  color:var(--dim);background:#21262d;border:1px solid var(--line);
+  padding:3px 7px;border-radius:7px;letter-spacing:.3px;white-space:nowrap
+}
+.ver-line{
+  text-align:center;margin:16px 0 0;font-size:12.5px;
+  font-family:ui-monospace,Menlo,monospace;color:var(--dim);letter-spacing:.3px
+}
+
+.stale-bar{
+  position:fixed;top:0;left:0;right:0;z-index:200;
+  display:flex;align-items:center;justify-content:center;gap:12px;
+  background:#7a1d13;color:#ffd9d4;border-bottom:2px solid var(--bad);
+  padding:calc(9px + env(safe-area-inset-top,0px)) 14px 9px;
+  font-size:13px;font-weight:700;text-align:center;line-height:1.35
+}
+.stale-btn{
+  flex:0 0 auto;background:#ffd9d4;color:#7a1d13;border:none;border-radius:8px;
+  font-family:inherit;font-size:11.5px;font-weight:900;letter-spacing:.7px;
+  padding:7px 11px;cursor:pointer
+}
+.stale-btn:active{filter:brightness(.9)}
+body:has(.stale-bar:not(.hidden)){padding-top:46px}

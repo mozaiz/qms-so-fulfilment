@@ -36,7 +36,52 @@ copy of the same folder.
 <sub>Windows path is written but not yet proven on a real store PC — if it errors,
 use Path B on a mini PC, or the manual steps at the bottom.</sub>
 
-### Path B — mini PC / Linux  *(tested)*
+### Path B — Mac  *(tested)*
+
+Works on any Mac: MacBook Air, Mac mini, or the iMac at the POS counter.
+
+Open **Terminal** (press `⌘ Space`, type `Terminal`, press Enter), then either:
+
+**If you have the QMS folder already** — type `cd `, drag the folder into the
+Terminal window, press Enter, then:
+
+```bash
+bash install.sh
+```
+
+**Or straight from the internet**, with nothing downloaded:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash
+```
+
+Either way it takes 2–4 minutes. When it prints **Done**, open
+`http://localhost:8099`.
+
+What it sets up, so you know what to expect:
+
+- Installs into **`~/QMS`** (your home folder — no `sudo`, no password needed).
+- Registers a **launch agent**, so QMS starts by itself every time you log in
+  and comes back if it ever crashes.
+- Wraps the server in **`caffeinate`**, so the Mac does not fall asleep and drop
+  the other counters off the wifi.
+- Sets up a **nightly SQLite backup** at 3:30am into `~/QMS/backups`
+  (last 30 kept). It uses `sqlite3 .backup`, not a file copy — a copy taken while
+  the app is writing gives you a backup you cannot restore.
+
+**Keep automatic login on** for a POS Mac. A launch agent starts at *login*, not
+at boot, so the machine has to log itself in.
+
+> **macOS will ask two questions the first time.** Both must be allowed:
+>
+> 1. *"Do you want the application **python** to accept incoming network
+>    connections?"* → **Allow**. Without this, no other device can reach QMS.
+> 2. *"…allow to find devices on local networks"* → **Allow**, same reason.
+>
+> If you dismissed them, open **System Settings → Network → Firewall → Options**
+> and allow `python`.
+
+### Path C — mini PC / Linux  *(tested)*
 
 Plug in the box, open a terminal, and run:
 

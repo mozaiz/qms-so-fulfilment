@@ -1,0 +1,43 @@
+QMS — SO Fulfilment
+===================
+
+HOW TO INSTALL ON A MAC
+-----------------------
+
+1. Open Terminal.  (Press Command+Space, type Terminal, press Enter.)
+
+2. Type  cd  then a SPACE, drag the folder you just unzipped into the
+   Terminal window, and press Enter.  (Dragging fills in the path for you.)
+
+3. Type this and press Enter:
+
+       bash install.sh
+
+   Wait 2-4 minutes. When it says "Done" it prints the address to open.
+
+4. Open Safari/Chrome and go to:
+
+       http://localhost:8099
+
+   Use the SCANNER role on this computer — the camera only works here.
+
+WHAT EACH ROLE OPENS
+--------------------
+   SCANNER   ->  http://localhost:8099        (this Mac, camera works)
+   POS 1-4   ->  http://<this-mac-ip>:8099    (any phone/tablet on the wifi)
+   BACKSTORE ->  http://<this-mac-ip>:8099    (same)
+
+   The installer prints <this-mac-ip> at the end. It is also on the
+   Setup screen inside the app, with a QR code you can scan.
+
+IF SOMETHING GOES WRONG
+-----------------------
+   Read the log:
+       tail -f ~/QMS/qms.log
+
+   Not reachable from other devices? macOS asked something like
+   "Do you want the application python to accept incoming network
+   connections?" — you must click ALLOW.
+
+   App looks out of date? There is a red bar at the top of the screen.
+   Tap RELOAD.

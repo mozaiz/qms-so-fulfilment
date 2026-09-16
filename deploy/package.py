@@ -47,7 +47,7 @@ SKIP_NAME = {"test_barcodes.png"}
 # These are not preferences. Without them the archive boots into a broken app,
 # which is precisely the failure this list exists to make impossible.
 REQUIRED = [
-    "app.py", "netinfo.py", "make_cert.py",
+    "app.py", "netinfo.py", "make_cert.py", "make_install_guide.py",
     "run.sh", "install.sh", "requirements.txt",
     "static/index.html", "static/js/app.js", "static/phone-setup.html",
 ]

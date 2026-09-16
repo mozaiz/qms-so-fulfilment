@@ -282,6 +282,7 @@ do_uninstall() {
     for f in app.py netinfo.py make_cert.py requirements.txt run.sh install.sh \
              qms.sh qms-backup.sh \
              make_test_barcodes.py make_qr_card.py make_preview.py seed_demo.py \
+             make_install_guide.py \
              test_flow.py README.md INSTALL.md LICENSE START-HERE.txt \
              Dockerfile docker-compose.yml qms.env.example; do
       rm -f "$APP_DIR/$f" 2>/dev/null || true
@@ -644,6 +645,7 @@ else
     # missing here produces an install that boots into a broken app.
     for f in app.py netinfo.py make_cert.py requirements.txt run.sh install.sh \
              qms.sh qms-backup.sh make_qr_card.py make_test_barcodes.py \
+             make_install_guide.py \
              seed_demo.py test_flow.py README.md INSTALL.md LICENSE START-HERE.txt; do
       [ -f "$SRC_DIR/$f" ] && cp "$SRC_DIR/$f" "$APP_DIR"/
     done

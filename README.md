@@ -83,6 +83,30 @@ Nothing is downloaded, nothing is written, no service is touched. Safe on a
 machine you have not decided about yet. If something is missing it says which
 **one** command fixes it (`xcode-select --install` on a Mac, usually).
 
+### Print the setup sheet for the outlet
+
+Two pages of A4, with this machine's real addresses and QR codes on it. This is
+what the person at the outlet actually gets — they will never see this README.
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; cd "$D" && ./venv/bin/python make_install_guide.py
+```
+
+Writes `qms_install_guide.pdf` (plus `.png` previews) into the install folder.
+
+| Page | For |
+|---|---|
+| 1 | **POS 1** — the one-liner to install, the one-liner to start, and the address for P1–P4 · Backstore |
+| 2 | **The SCANNER phone** — install the certificate, then the secure address to scan on |
+
+Printing before the machine is set up? `--blank` leaves the addresses as lines to
+write in by hand.
+
+Three things the sheet exists to say, because they are only obvious afterwards:
+POS 1 is the only computer you set up and it must stay on; **P1 to P4 all open the
+same address** and differ only by the button they tap; and an iPhone needs a
+second switch turned on in Settings or the camera will never appear.
+
 ### Install a specific version instead of the latest
 
 ```bash
@@ -822,6 +846,7 @@ python3 -m venv venv
 | `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
+| `deploy/test_guide.py` | 35 | **The printed setup sheet**: fits A4, keeps out of the print margins, is not half empty, and **every QR code is decoded** and checked against the address it claims to be — a sheet on a wall is not debuggable, and a QR pointing at the wrong address is worse than no QR |
 | `deploy/test_https.py` | 34 | **The phone-scanner path**: the local CA, that the certificate covers every address the box answers on, that it rebuilds when the address moves but keeps the same CA (or every phone in the store silently loses trust), that HTTPS is trusted with the CA and **rejected** without it, and that the iOS profile is a real profile |
 | `deploy/test_readme.py` | 25 | **Every copy-paste one-liner in this README, executed** against a real install — a README nobody has run is worse than none |
 | `deploy/test_lifecycle.py` | 47 | install → uninstall → **re-install with the data intact** → purge, that a bare `--purge` refuses, and that `qms.sh doctor` correctly reports a stopped install and a running one |

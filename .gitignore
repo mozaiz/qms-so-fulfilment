@@ -23,6 +23,8 @@ certs/
 screens/
 qr_card_*.png
 qr_card_*.pdf
+# the setup sheet carries one store's addresses — generate, do not commit
+qms_install_guide*
 test_barcodes.png
 *.log
 

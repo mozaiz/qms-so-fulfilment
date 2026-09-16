@@ -93,10 +93,16 @@ jobs:
             if "$@" >"$out" 2>&1; then
               printf '\n  PASS  %s  --  %s\n' "$label" "$(grep -oE 'PASSED [0-9]+ / [0-9]+' "$out" | tail -1)"
             else
-              printf '\n  FAIL  %s  (exit %d)\n' "$label" "$?"
+              rc=$?
+              printf '\n  FAIL  %s  (exit %d)\n' "$label" "$rc"
               echo "  ------------------------------------------------"
               tail -40 "$out" | sed 's/^/  /'
               echo "  ------------------------------------------------"
+              # Also raise it as an annotation. Annotations are readable through
+              # the API without admin rights, so a failure can be diagnosed from
+              # anywhere instead of needing somebody to open the Actions tab —
+              # and they show up in the PR and the run summary too.
+              echo "::error title=suite failed: $label (exit $rc)::$(tail -8 "$out" | tr -d '\r' | tr '\n' '~' | sed 's/%/%25/g' | head -c 900)"
               fail=1
             fi
           }

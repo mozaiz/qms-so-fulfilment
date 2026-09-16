@@ -76,6 +76,23 @@ production:
 curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | QMS_REF=v0.8.1 bash
 ```
 
+## A startup race, and why the listeners are started in order
+
+`run.sh` starts the plain listener first, waits for it to answer, and only then
+starts the secure one. That ordering is deliberate.
+
+On a first install both listeners create and migrate the same database. SQLite
+cannot be made to wait for DDL or for a journal-mode switch the way `busy_timeout`
+handles ordinary writes — `PRAGMA journal_mode=WAL` fails outright if another
+connection is active, and that failure ignores the timeout entirely. Starting the
+two together was therefore a race that one of them lost, and the only symptom at
+a store is *"the scanner does not work"*, with the service apparently running.
+
+The app also no longer dies for that: WAL is a persistent property of the database
+rather than of a connection, so the switch is attempted once and tolerated, and
+`init_db` retries a lock failure instead of giving up. Both are covered by
+`deploy/test_persistence.py`.
+
 ## Reporting
 
 This is a personal internal tool, not a product with a security team. Open an

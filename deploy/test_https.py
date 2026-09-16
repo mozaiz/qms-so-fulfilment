@@ -219,9 +219,16 @@ try:
     # The TLS listener is the entire subject of this suite, so prove it answered
     # rather than inferring it from the plain one. Without its own readiness check
     # a TLS start failure shows up later as an unrelated-looking status=None.
-    tls_up = wait_for(f"https://127.0.0.1:{TLS_PORT}/api/health", ssl_ctx(), tries=25)
-    check("the secure server came up", tls_up,
-          "" if tls_up else "it never answered — see the server output below")
+    tls_up = wait_for(f"https://127.0.0.1:{TLS_PORT}/api/health", ssl_ctx(), tries=40)
+    if not tls_up:
+        # "it never answered" and "it exited on startup" are different problems,
+        # and the exit code is the fastest way to tell them apart.
+        rc = procs[0].poll()
+        detail = ("the process EXITED with code " + str(rc)) if rc is not None \
+            else "the process is still running but never answered"
+        check("the secure server came up", False, detail)
+    else:
+        check("the secure server came up", True)
 
     if not (up and tls_up):
         for name, fh in (("secure", tls_log), ("plain", http_log)):
@@ -412,6 +419,22 @@ finally:
         except subprocess.TimeoutExpired:
             p.kill()
     shutil.rmtree(TMP, ignore_errors=True)
+
+# If a listener failed, put its output last. A suite's summary is the final thing
+# anyone sees — and in CI the annotation is built from the tail — so the evidence
+# has to be at the end, not buried above the verdict.
+if not (up and tls_up):
+    for name, fh in (("secure", tls_log), ("plain", http_log)):
+        try:
+            fh.flush()
+            fh.seek(0)
+            body = fh.read().strip()
+        except Exception:
+            body = ""
+        if body:
+            print(f"\n---- {name} listener output (why it failed) ----")
+            for line in body.splitlines()[-20:]:
+                print("  " + line)
 
 print("\n" + "=" * 64)
 print(f"PASSED {len(PASS)} / {len(PASS) + len(FAIL)}")

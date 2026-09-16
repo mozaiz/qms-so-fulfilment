@@ -22,6 +22,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -113,8 +114,17 @@ def mins_between(a: datetime | None, b: datetime | None) -> float | None:
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # WAL is a persistent property of the database file, not of a connection, so
+    # this only has real work to do once. Asking for it on every connect is what
+    # lets two listeners starting together fail: the journal mode cannot be
+    # switched while another connection is active, and that particular error
+    # ignores busy_timeout entirely. Ask, and carry on if it is already settled.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -224,6 +234,31 @@ def pos_count_of(conn: sqlite3.Connection, store_id: int) -> int:
 
 
 def init_db() -> None:
+    """Create the schema, migrate it, and seed a fresh store — tolerating a race.
+
+    On a fresh install run.sh starts both listeners at once, and both call this.
+    DDL and the WAL switch cannot be made to wait by busy_timeout, so losing the
+    race is a normal outcome rather than an exceptional one. Retrying costs a
+    second in the worst case; not retrying leaves a store with one listener dead
+    and the only symptom is "the camera does not work".
+    """
+    delay = 0.3
+    last: Optional[Exception] = None
+    for _ in range(8):
+        try:
+            _init_db_once()
+            return
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            last = e
+            time.sleep(delay)
+            delay = min(delay * 1.7, 3.0)
+    raise last if last else RuntimeError("init_db failed")
+
+
+def _init_db_once() -> None:
     conn = get_db()
     try:
         conn.executescript(SCHEMA)
@@ -299,7 +334,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.8.4", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.8.5", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:

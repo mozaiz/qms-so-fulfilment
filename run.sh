@@ -63,6 +63,7 @@ PY
 }
 
 TLS_STARTED=0
+TLS_WANTED=0
 if [ ! -f certs/server.crt ] || [ ! -f certs/server.key ]; then
   echo "no certificate in certs/ — serving plain HTTP only." >&2
   echo "run ./venv/bin/python make_cert.py to enable phone scanning." >&2
@@ -73,21 +74,39 @@ elif [ "$(port_free "$TLS_PORT")" != "free" ]; then
   echo "POS and Backstore are unaffected. Check what holds it, or change" >&2
   echo "QMS_TLS_PORT in qms.env." >&2
 else
+  TLS_WANTED=1
+fi
+
+# Plain first, and wait for it to answer, THEN the secure one.
+#
+# Both listeners create and migrate the same database on a fresh install, and
+# SQLite cannot serialise DDL or a journal-mode switch the way busy_timeout
+# handles ordinary writes — so starting them together is a race that one of them
+# loses, leaving a store quietly missing either its counters or its scanner. The
+# app retries, but ordering them means there is nothing to retry.
+./venv/bin/uvicorn app:app \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --log-level "$LEVEL" &
+PIDS="$PIDS$!"
+
+for _ in $(seq 1 40); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+if [ "${TLS_WANTED:-0}" = "1" ]; then
   ./venv/bin/uvicorn app:app \
     --host 0.0.0.0 \
     --port "$TLS_PORT" \
     --ssl-keyfile certs/server.key \
     --ssl-certfile certs/server.crt \
     --log-level "$LEVEL" &
-  PIDS="$! "
+  PIDS="$PIDS $!"
   TLS_STARTED=1
 fi
-
-./venv/bin/uvicorn app:app \
-  --host 0.0.0.0 \
-  --port "$PORT" \
-  --log-level "$LEVEL" &
-PIDS="$PIDS$!"
 
 if [ "$TLS_STARTED" = "1" ]; then
   echo "QMS listening on http://<this-machine>:$PORT and https://<this-machine>:$TLS_PORT"

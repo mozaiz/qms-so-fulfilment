@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -189,6 +190,43 @@ check("the database file itself was not recreated", sorted(os.listdir(D)) == bef
 p.terminate()
 p.wait(timeout=10)
 shutil.rmtree(D, ignore_errors=True)
+
+# ---------------------------------------------------------------- startup race
+print("\n== two listeners can start together on a fresh database ==")
+# run.sh starts the plain and the secure listener, and on a first install both
+# create and migrate the same database. SQLite cannot serialise DDL or a
+# journal-mode switch the way busy_timeout handles ordinary writes, so this race
+# used to kill one of them — and the only symptom at a store is "the scanner does
+# not work", with the service apparently running fine.
+race_db = os.path.join(tempfile.gettempdir(), "qms-race.db")
+for suffix in ("", "-wal", "-shm"):
+    os.path.exists(race_db + suffix) and os.remove(race_db + suffix)
+
+race_code = (
+    "import os, sys, threading\n"
+    "sys.path.insert(0, os.getcwd())\n"
+    "import app\n"
+    "out = []\n"
+    "def go(tag):\n"
+    "    try:\n"
+    "        app.init_db(); out.append(tag + ':ok')\n"
+    "    except Exception as e:\n"
+    "        out.append(tag + ':' + type(e).__name__)\n"
+    "ts = [threading.Thread(target=go, args=(t,)) for t in ('A', 'B')]\n"
+    "[t.start() for t in ts]\n"
+    "[t.join() for t in ts]\n"
+    "print(' '.join(sorted(out)))\n"
+)
+race = subprocess.run([sys.executable, "-c", race_code], cwd=APP,
+                      env=dict(os.environ, QMS_DB=race_db, QMS_STORE_CODE="RACE",
+                               QMS_STORE_NAME="Race Test"),
+                      capture_output=True, text=True, timeout=120)
+if race.stdout.strip() != "A:ok B:ok":
+    print(f"        got: {race.stdout.strip()!r}  {race.stderr.strip()[-120:]}")
+check("both initialisations survive a simultaneous start",
+      race.stdout.strip() == "A:ok B:ok")
+for suffix in ("", "-wal", "-shm"):
+    os.path.exists(race_db + suffix) and os.remove(race_db + suffix)
 
 print("\n" + "=" * 52)
 print(f"PASSED {len(PASS)} / {len(PASS) + len(FAIL)}")

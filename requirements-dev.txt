@@ -4,7 +4,10 @@
 #   pip install -r requirements.txt -r requirements-dev.txt
 
 # Decodes the QR codes on the generated setup sheet, so the guide suite can prove
-# each one points at the address it claims to. Without it that suite silently
-# skips its most valuable check — and a skipped check is indistinguishable from a
-# passing one in the output.
-zxing-cpp>=2.2
+# each one points at the address it claims to. Without it that suite skips its
+# most valuable check, which is why CI installs it.
+#
+# python_version >= 3.10 is not decoration: zxing-cpp's metadata claims >=3.9, but
+# it publishes no cp39 wheel, so pip tries to build the C++ extension from source
+# and fails — turning "Install dependencies" red on the 3.9 job. Caught by CI.
+zxing-cpp>=2.2 ; python_version >= "3.10"

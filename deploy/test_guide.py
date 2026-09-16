@@ -44,7 +44,12 @@ try:
     import zxingcpp
     HAS_ZXING = True
 except ImportError:
+    # zxing-cpp publishes no wheel for Python 3.9, so on that interpreter the QR
+    # checks below skip. The skip is printed rather than silent: a quietly skipped
+    # check is indistinguishable from a passing one.
     HAS_ZXING = False
+    print(f"  note: zxing-cpp unavailable on Python {sys.version_info.major}.{sys.version_info.minor}"
+          f" — the QR contents will NOT be verified in this run")
 
 SRC = open(os.path.join(REPO, "make_install_guide.py"), encoding="utf-8").read()
 

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
 
@@ -292,7 +292,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.6.3", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.6.4", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:
@@ -1163,6 +1163,40 @@ def health():
 @app.get("/admin")
 def redirect_admin():
     return RedirectResponse(url="/")
+
+
+# Served explicitly so the asset URLs can carry the version. Registered before
+# the static mount, so it wins for "/".
+@app.get("/", include_in_schema=False)
+async def index_page():
+    with open(os.path.join(BASE_DIR, "static", "index.html"), encoding="utf-8") as fh:
+        html = fh.read().replace("__V__", app.version)
+    return HTMLResponse(html)
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    """Say what may be cached instead of leaving it to whatever sits in front.
+
+    With no Cache-Control at all, Cloudflare applies its own 4-hour edge TTL to
+    .js and .css — so an upgrade lands on disk, the server serves it, and the
+    browser still gets the old file from the edge. That is indistinguishable from
+    a broken fix.
+
+    Everything the app shell needs is `no-cache`: always revalidate, then use the
+    cached copy if unchanged. The URLs are version-stamped anyway, so this costs
+    one conditional request per load on a LAN and removes the whole class.
+    """
+    resp = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") or path.startswith("/setup/"):
+        resp.headers["Cache-Control"] = "no-store"
+    elif path.startswith("/vendor/") or path.startswith("/icons/"):
+        # vendored library and icons: same bytes every release
+        resp.headers.setdefault("Cache-Control", "public, max-age=604800")
+    else:
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
 
 
 app.mount("/", StaticFiles(directory=os.path.join(BASE_DIR, "static"), html=True), name="static")

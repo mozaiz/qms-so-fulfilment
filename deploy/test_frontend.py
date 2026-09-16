@@ -76,6 +76,26 @@ if m:
           show_pos != -1 and (await_pos == -1 or show_pos < await_pos),
           f"show at {show_pos}, first await at {await_pos}")
 
+print("\n== asset URLs are version-stamped ==")
+# Cloudflare caches .js/.css by extension for 4 hours and ignores the origin, so
+# any asset served at a fixed URL stays stale at the edge after a deploy. The
+# page must request versioned URLs, and the server must fill the version in.
+check("index.html has an __V__ placeholder", "__V__" in html)
+for asset in ("/css/app.css", "/js/app.js", "/manifest.json", "/vendor/zxing.min.js"):
+    ref = re.search(r'(?:href|src)="' + re.escape(asset) + r'([^"]*)"', html)
+    check(f"{asset} carries ?v=__V__",
+          bool(ref) and ref.group(1) == "?v=__V__",
+          f"got {ref.group(1)!r}" if ref else "reference missing")
+check("no unversioned .js/.css reference is left in the page",
+      not re.search(r'(?:href|src)="/(?:js|css)/[^"?]+"', html))
+check("app.py substitutes __V__ when serving /",
+      '__V__' in app and "replace(\"__V__\", app.version)" in app)
+
+print("\n== static assets say how they may be cached ==")
+check("a cache middleware is installed", '@app.middleware("http")' in app)
+check("the app shell is no-cache", "no-cache, must-revalidate" in app)
+check("api responses are no-store", '"no-store"' in app)
+
 print("\n== version markers agree ==")
 app_ver = re.search(r'version="([0-9.]+)"', app).group(1)
 js_ver = re.search(r'var APP_VER = "([0-9.]+)"', js).group(1)

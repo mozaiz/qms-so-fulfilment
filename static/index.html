@@ -8,9 +8,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="QMS">
-<link rel="manifest" href="/manifest.json">
+<!-- ?v=__V__ is replaced at serve time with the app version. Cloudflare caches
+     .js and .css by extension for 4 hours and ignores the origin, so a deploy
+     that keeps the same URL is invisible until that expires. A new version
+     means a new URL, which the edge has never seen. -->
+<link rel="manifest" href="/manifest.json?v=__V__">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
-<link rel="stylesheet" href="/css/app.css">
+<link rel="stylesheet" href="/css/app.css?v=__V__">
 </head>
 <body>
 
@@ -189,7 +193,7 @@
 <nav id="tabbar" class="tabbar hidden"></nav>
 <div id="toast" class="toast hidden"></div>
 
-<script src="/vendor/zxing.min.js"></script>
-<script src="/js/app.js"></script>
+<script src="/vendor/zxing.min.js?v=__V__"></script>
+<script src="/js/app.js?v=__V__"></script>
 </body>
 </html>

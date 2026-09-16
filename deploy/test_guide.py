@@ -131,18 +131,26 @@ else:
 
 print("\n== the addresses are a LAN address, not localhost or a VPN ==")
 # localhost on a printed sheet is useless: it means 'this device' on every device
-for png in pages:
-    q = qrs(os.path.join(TMP, png)) or []
-    for u in q:
-        check(f"   {u.split('//')[-1][:34]} is reachable from another device",
-              "localhost" not in u and "127.0.0.1" not in u)
+if HAS_ZXING:
+    for png in pages:
+        for u in qrs(os.path.join(TMP, png)) or []:
+            check(f"   {u.split('//')[-1][:34]} is reachable from another device",
+                  "localhost" not in u and "127.0.0.1" not in u)
+else:
+    print("  SKIP  cannot read the addresses back without a decoder")
 
 print("\n== the lines staff must paste are the real ones ==")
 r = generate("--blank")
-blank_p1 = qrs(os.path.join(TMP, "qms_install_guide_p1.png")) if HAS_ZXING else None
 check("--blank still runs", r.returncode == 0)
-check("--blank leaves the QR as a placeholder", blank_p1 and "192.168.0.0" in blank_p1[0],
-      str(blank_p1))
+if HAS_ZXING:
+    blank_p1 = qrs(os.path.join(TMP, "qms_install_guide_p1.png"))
+    check("--blank leaves the QR as a placeholder", blank_p1 and "192.168.0.0" in blank_p1[0],
+          str(blank_p1))
+else:
+    # A check that cannot run is skipped, not failed. Failing here says the
+    # product is broken when the truth is that the decoder is missing — and a
+    # suite that goes red for the wrong reason gets ignored.
+    print("  SKIP  --blank QR contents — zxing-cpp not installed (pip install -r requirements-dev.txt)")
 
 # The one-liners have to match what actually exists, or the sheet teaches staff a
 # command that fails. Cross-check the important ones against the repository.

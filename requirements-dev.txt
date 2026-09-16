@@ -1,0 +1,10 @@
+# Test-only dependencies. NOT installed on a store box — these exist so the suites
+# can check things a store must never have to download.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Decodes the QR codes on the generated setup sheet, so the guide suite can prove
+# each one points at the address it claims to. Without it that suite silently
+# skips its most valuable check — and a skipped check is indistinguishable from a
+# passing one in the output.
+zxing-cpp>=2.2

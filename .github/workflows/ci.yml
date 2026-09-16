@@ -36,6 +36,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Test-only: zxing-cpp decodes the QR codes on the generated setup
+          # sheet. Without it the guide suite skips its best check.
+          pip install -r requirements-dev.txt
 
       # Installing dependencies proves nothing about whether the code runs.
       # This is the check whose absence let a build that could not start reach a

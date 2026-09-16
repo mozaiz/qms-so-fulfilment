@@ -19,3 +19,5 @@ pillow>=10.0
 # single wheel and leaving it out means the phone-scanning path is missing on a
 # fresh install.
 cryptography>=42.0
+# NOTE: test-only dependencies live in requirements-dev.txt. Keep this file to
+# what a store box actually needs on install day.

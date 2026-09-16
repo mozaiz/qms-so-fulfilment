@@ -850,7 +850,11 @@ svc() {
 
 case "\$1" in
   status|uninstall|check)
-    exec "\$APP_DIR/install.sh" "--\$1" ;;
+    # Pass APP_DIR through. Without it install.sh falls back to its own default
+    # (/opt/qms on Linux, ~/QMS on macOS) and reports "no app found" for an
+    # install that is sitting right here — and reads the wrong qms.env, so it
+    # probes the wrong port and finds some other server.
+    APP_DIR="\$APP_DIR" exec "\$APP_DIR/install.sh" "--\$1" ;;
   url)
     echo "On this computer : http://localhost:\$PORT"
     if [ "\$OS" = macos ]; then

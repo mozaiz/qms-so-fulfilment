@@ -1,6 +1,6 @@
 """Generate a printable A4 sign for the store wall.
 
-    ./venv/bin/python make_qr_card.py                     # uses localhost:8099
+    ./venv/bin/python make_qr_card.py                    # uses the port in qms.env
     ./venv/bin/python make_qr_card.py http://localhost:8099
 
 One sheet per outlet: big QR, the address in plain text underneath, and three
@@ -11,14 +11,34 @@ Outputs qr_card_<STORE>.png and .pdf next to this script.
 import io
 import json
 import os
+import re
 import sys
 import urllib.request
 
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
 
-BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8099").rstrip("/")
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def default_base():
+    """The port this install actually listens on, not a hardcoded 8099.
+
+    Run on a box installed on a non-default port, a hardcoded default quietly
+    prints a wall sign pointing at nothing.
+    """
+    port = "8099"
+    try:
+        with open(os.path.join(HERE, "qms.env"), encoding="utf-8") as fh:
+            m = re.search(r"^QMS_PORT=\s*['\"]?(\d+)", fh.read(), re.M)
+            if m:
+                port = m.group(1)
+    except OSError:
+        pass
+    return f"http://127.0.0.1:{port}"
+
+
+BASE = (sys.argv[1] if len(sys.argv) > 1 else default_base()).rstrip("/")
 
 DPI = 150
 W, H = int(8.27 * DPI), int(11.69 * DPI)      # A4 portrait

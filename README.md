@@ -34,20 +34,30 @@ the same on all of them — the platform is detected rather than chosen.
 
 ---
 
-## Quick start
+## Install
 
-One line, on the machine that will run it — Linux, macOS, or a mini PC:
+Open **Terminal** on the computer that will run it, and paste **one line**.
+
+### macOS and Linux — install, or upgrade an existing install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash
 ```
 
-Or from a checkout: `./install.sh`
+That is the whole thing. It checks the machine, downloads the app, installs its
+packages, registers it to start automatically, and prints the address to open.
+About 2–4 minutes. **On a Mac it installs to `~/QMS`; on Linux to `/opt/qms`.**
 
-Not sure the machine is up to it? Ask first — **this changes nothing**:
+When it says **Done**, open:
+
+```
+http://localhost:8099
+```
+
+### Check the machine first — changes nothing
 
 ```bash
-./install.sh --check
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash -s -- --check
 ```
 
 ```
@@ -69,28 +79,52 @@ Not sure the machine is up to it? Ask first — **this changes nothing**:
       It will download the app, then about 25 MB of Python packages.
 ```
 
-Nothing is downloaded, nothing is written, no service is touched — so it is safe
-on a machine you have not decided about yet. A normal install runs the same
-checks first and reports before it touches anything.
+Nothing is downloaded, nothing is written, no service is touched. Safe on a
+machine you have not decided about yet. If something is missing it says which
+**one** command fixes it (`xcode-select --install` on a Mac, usually).
 
-Windows: copy the folder and double-click `deploy\Install QMS (Windows).cmd`.
-
-Or grab a ready-made archive from the **Releases** page — it contains everything
-an outlet needs and nothing else.
-
-Full step-by-step, written for whoever is setting it up at the outlet:
-**[INSTALL.md](INSTALL.md)**
-
-Then print the wall sign — this is the entire staff training:
+### Install a specific version instead of the latest
 
 ```bash
-./venv/bin/python make_qr_card.py     # -> qr_card_<STORE>.pdf (A4)
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | QMS_REF=v0.6.4 bash
+```
+
+Use this for outlets: everyone gets the same tested build instead of whatever
+`main` happens to be that morning.
+
+### No internet at the outlet
+
+Download `qms-<version>.tar.gz` from the **Releases** page, unzip it, and run:
+
+```bash
+bash install.sh
+```
+
+### Windows
+
+Copy the folder and double-click `deploy\Install QMS (Windows).cmd`.
+
+### What you need
+
+| | |
+|---|---|
+| **A computer that stays on** during trading hours | Any Mac, a Linux mini PC, a spare desktop. 4 GB RAM is plenty. |
+| **On the store wifi/LAN** | so the POS screens and phones can reach it |
+| **A stable address** | ask whoever manages the router to reserve the IP |
+
+Full step-by-step for the person setting it up at the outlet:
+**[INSTALL.md](INSTALL.md)**
+
+Then print the wall sign — this is the entire staff training (one line):
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; "$D/venv/bin/python" "$D/make_qr_card.py"
 ```
 
 To cut a release:
 
 ```bash
-git tag v0.6.0 && git push origin v0.6.0
+git tag v0.6.5 && git push origin v0.6.5
 ```
 
 CI builds the archives, **installs one in a clean container and boots it** to prove
@@ -103,21 +137,69 @@ Licence: MIT — see [LICENSE](LICENSE).
 
 ## Running it day to day
 
-From the install folder. Nobody needs to remember `launchctl` or `systemctl`:
+Nobody needs to remember `launchctl` or `systemctl`. Every command below is a
+**single line you can paste straight into Terminal**.
 
-```
-sh qms.sh status      is it running, where is the data, when was the last backup
-sh qms.sh stop        take it down
-sh qms.sh start       bring it back
-sh qms.sh restart     stop, then start
-sh qms.sh url         the address each device should open
-sh qms.sh log         follow the log
-sh qms.sh backup      take a backup right now
-sh qms.sh uninstall   remove the program, keep the data
-sh qms.sh doctor      something is wrong — collect everything at once
+These are installed to `~/QMS` on a Mac and `/opt/qms` on Linux, so the
+one-liners that follow work out the location themselves.
+
+### Restart the service
+
+The one people need most. Use it after an upgrade, or when the page stops
+responding.
+
+**Any machine — macOS or Linux:**
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" restart
 ```
 
-Or, from anywhere: `./install.sh --status`
+**Short form if you know where it is:**
+
+```bash
+sh ~/QMS/qms.sh restart
+```
+
+```bash
+sudo systemctl restart qms
+```
+
+> **An upgrade is not live until you restart.** The server reads `app.py` when it
+> starts, so new code on disk does nothing until the service comes back up.
+
+### Stop, start, check
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" status
+```
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" stop
+```
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" start
+```
+
+| | |
+|---|---|
+| `status` | is it running, where is the data, when was the last backup |
+| `stop` | take it down — **your data is not touched** |
+| `start` | bring it back |
+| `restart` | stop, then start |
+| `url` | the address each device should open |
+| `log` | follow the log live (Ctrl+C to stop watching) |
+| `backup` | take a backup right now |
+| `doctor` | something is wrong — collect everything at once |
+| `uninstall` | remove the program, keep the data |
+
+**Where the service lives**, if you would rather use the platform's own tools:
+
+| | macOS | Linux |
+|---|---|---|
+| name | `com.machines.qms` | `qms` |
+| check | `launchctl print gui/$(id -u)/com.machines.qms` | `systemctl status qms` |
+| starts | at login | at boot |
 
 ```
 ==> QMS status
@@ -191,6 +273,155 @@ The sign-in screen shows `App vX · Server vY`, and every top bar carries a smal
 `vX` pill. When a phone is still running an older build than the server, a red
 bar appears across the top with a **RELOAD** button — a cached client otherwise
 looks exactly like a broken fix.
+
+---
+
+## Troubleshooting
+
+Start here for anything. One line, works on any machine, changes nothing:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" doctor
+```
+
+It prints the system, the install folder, the port, which files exist, whether
+the service is loaded, whether anything is listening, whether it answers, and the
+last 20 lines of the log — in one block you can copy and send to someone.
+
+Then find your symptom:
+
+### Nothing opens at all, or the page never loads
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" restart
+```
+
+Still nothing? Read the doctor output above. The decisive line is:
+
+- **`no qms.log`** → the server process has never run. A **service** problem, not
+  an app problem. Run `start` and read what it says.
+- **`NOTHING is listening on 8099`** → nothing is bound to the port. Same as above.
+- **something is listening but it does not answer** → the app started and then
+  failed. The log below it says why.
+
+### "Answering: no", or the service will not come up
+
+Get the actual error instead of guessing:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; tail -40 "$D/qms.log"
+```
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; tail -40 "$D/qms.err.log"
+```
+
+### The page opens but looks wrong, or stubbornly shows an old version
+
+This is a **cached client**, and it has caused more false bug reports than
+anything else. The server is almost certainly fine.
+
+- If there is a **red bar across the top**, tap **RELOAD**.
+- If not, force the browser to forget the app:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" url
+```
+
+Open that address, then use **AA → Website Settings → Clear Data** (Safari) or
+**Settings → Privacy → Clear browsing data** (Chrome), and reload.
+
+Check what the *server* is actually serving, which is the ground truth:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; curl -s "http://127.0.0.1:8099/api/health"
+```
+
+If that says a newer version than the screen does, it is the client. Nothing is
+broken on the server.
+
+### "Camera unavailable" or the camera does nothing
+
+The browser only hands over a camera on a **secure context**.
+
+| Where the page is opened | Camera |
+|---|---|
+| `http://localhost:8099` on the QMS computer | **works** |
+| `http://192.168.x.x:8099` from a phone | blocked |
+| `https://…` | works |
+
+So the **SCANNER** role belongs on the QMS computer itself. POS and BACKSTORE
+never need the camera and work fine on any phone. If a phone must scan, use
+**Type Manually**, or put HTTPS in front (a Cloudflare Tunnel is free).
+
+### Other devices cannot reach it
+
+On a **Mac**, macOS asks two things the first time and both must be allowed:
+
+1. *"Do you want the application python to accept incoming network connections?"*
+2. *"…allow to find devices on local networks"*
+
+Dismissed them? **System Settings → Network → Firewall → Options** → allow
+`python`. On Linux, check the firewall on port 8099.
+
+Then confirm the machine's own address:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" url
+```
+
+### The installer stops, or says Python is missing
+
+Run the check and read the `Result:` line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mozaiz/qms-so-fulfilment/main/install.sh | bash -s -- --check
+```
+
+- **`ONE STEP NEEDED`** → it prints the exact command. On a Mac that is almost
+  always `xcode-select --install` — click **Install**, wait, then re-run.
+- **`this build of QMS cannot start on this Python`** → the app was installed but
+  failed to import. The traceback is above that line and in
+  `"$D/import-check.err"`. Send it on.
+
+### The port is already in use
+
+The installer notices and steps to the next free port, then prints it. To see the
+port actually in use:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; grep QMS_PORT "$D/qms.env"
+```
+
+### I cannot reach the app on the address I wrote down
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" url
+```
+
+Or open the **Setup & Addresses** link on the sign-in screen — it shows every
+address this machine answers on, with QR codes to scan.
+
+### Where is my data, and how do I back it up?
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" status
+```
+
+Everything is one file, `qms.db`, in the install folder. Nightly backups land in
+`backups/` next to it (30 kept). Take one right now:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" backup
+```
+
+### Everything else
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" doctor
+```
+
+Send that whole block on. It answers most questions before they are asked.
 
 ---
 
@@ -470,7 +701,8 @@ python3 -m venv venv
 | `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
-| `deploy/test_lifecycle.py` | 44 | install → uninstall → **re-install with the data intact** → purge, that a bare `--purge` refuses, and that `qms.sh doctor` correctly reports a stopped install and a running one |
+| `deploy/test_readme.py` | 25 | **Every copy-paste one-liner in this README, executed** against a real install — a README nobody has run is worse than none |
+| `deploy/test_lifecycle.py` | 47 | install → uninstall → **re-install with the data intact** → purge, that a bare `--purge` refuses, and that `qms.sh doctor` correctly reports a stopped install and a running one |
 
 The installer tests install into a throwaway directory on a free port and run the
 real API suite against what they installed — an installer verified by reading it

@@ -264,6 +264,67 @@ try:
     st2, body2, hdrs2 = get(f"https://{lan_ip}:{TLS_PORT}/setup/ca.crt", ssl_ctx())
     check("the CA is reachable over https too", st2 == 200, f"status={st2}")
 
+    print("\n== whose certificate it is ==")
+    # The Organization field is what a phone shows when someone opens the
+    # certificate details, and what the iOS install screen displays. It is the
+    # only part of this that a person ever reads.
+    org = run([PY, "-c", f"""
+import sys
+sys.path.insert(0, {REPO!r})
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+for f in ("ca.crt", "server.crt"):
+    c = x509.load_pem_x509_certificate(open({CERT_DIR!r} + "/" + f, "rb").read())
+    o = c.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+    cn = c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    print(f + "|" + (o[0].value if o else "") + "|" + (cn[0].value if cn else ""))
+"""], env={"QMS_CERT_DIR": CERT_DIR})
+    rows = dict()
+    for line in org.stdout.splitlines():
+        if "|" in line:
+            f, o, cn = line.split("|")
+            rows[f] = (o, cn)
+    check("the CA names its owner", rows.get("ca.crt", ("", ""))[0] == "Zairi Khaidzir @ Mozaiz",
+          str(rows.get("ca.crt")))
+    check("the server certificate names its owner too",
+          rows.get("server.crt", ("", ""))[0] == "Zairi Khaidzir @ Mozaiz",
+          str(rows.get("server.crt")))
+    check("   ... and the server cert still names the machine, not the person",
+          rows.get("server.crt", ("", ""))[1] not in ("", "Zairi Khaidzir @ Mozaiz"),
+          rows.get("server.crt", ("", ""))[1])
+
+    st, body, _ = get(f"http://127.0.0.1:{HTTP_PORT}/setup/ca.mobileconfig")
+    prof = plistlib.loads(body)
+    check("the iOS profile shows the owner before you trust it",
+          prof.get("PayloadOrganization") == "Zairi Khaidzir @ Mozaiz",
+          str(prof.get("PayloadOrganization")))
+    check("   ... and the profile name carries it",
+          "Zairi Khaidzir @ Mozaiz" in (prof.get("PayloadDisplayName") or ""),
+          prof.get("PayloadDisplayName", ""))
+    # The printed guide tells staff to look for this EXACT label in Certificate
+    # Trust Settings. Renaming it breaks the sheet on the wall.
+    inner = (prof.get("PayloadContent") or [{}])[0]
+    check("   ... but the cert label the guide names is UNCHANGED",
+          inner.get("PayloadDisplayName") == "QMS Store Certificate Authority",
+          str(inner.get("PayloadDisplayName")))
+
+    # A certificate's subject cannot be edited, so a changed name is a changed
+    # CA — and that silently un-trusts every phone already set up.
+    print("\n== changing the name rebuilds the CA and says so ==")
+    moved = run([PY, "make_cert.py"], env={"QMS_CERT_DIR": CERT_DIR, "QMS_CERT_ORG": "Someone Else"})
+    check("a different name is treated as a different CA",
+          "DIFFERENT certificate authority" in moved.stdout, moved.stdout.strip().splitlines()[-1][:70])
+    check("   ... and it warns that phones must be set up again",
+          "must install the new one" in moved.stdout)
+    # Changing the name back is itself another change, so this run rebuilds too.
+    back = run([PY, "make_cert.py"], env={"QMS_CERT_DIR": CERT_DIR})
+    check("   ... and changing it back is also treated as a change",
+          "DIFFERENT certificate authority" in back.stdout)
+    steady = run([PY, "make_cert.py"], env={"QMS_CERT_DIR": CERT_DIR})
+    check("   ... and once the name matches it settles down",
+          "nothing to do" in steady.stdout, steady.stdout.strip().splitlines()[-1][:60])
+    check("   ... reporting whose it is", "Zairi Khaidzir @ Mozaiz" in steady.stdout)
+
     # Staff type this from memory, on a phone, in a hurry.
     print("\n== near-miss addresses go to the page, not to a JSON 404 ==")
     for typo in ("/phone/setup", "/phone", "/phonesetup", "/setup"):

@@ -427,7 +427,7 @@ def page_one(net, lan_url, blank_mode, store):
     return p.finish(1, 2)
 
 
-def page_two(net, lan_url, tls_url, blank_mode, store):
+def page_two(net, lan_url, tls_url, blank_mode, store, org):
     p = Page()
     p.d.rectangle((0, 0, W, 12), fill=ACCENT)
 
@@ -454,9 +454,11 @@ def page_two(net, lan_url, tls_url, blank_mode, store):
     p.qtile("http://192.168.0.0:8099/setup/phone" if blank_mode else setup_url,
             size=150, label="QR — scan with the phone",
             right_lines=[setup_url], gap=24)
-    p.space(16)
+    p.space(8)
 
     p.step(2, "Install the certificate")
+    p.space(6)
+    p.para(f'The install screen will say  "{org}".', sans(20), DIM, lh=28)
     p.space(6)
     p.callout("iPhone / iPad — TWO steps, do not stop after the first",
               "1.  Tap Install certificate → Settings → Profile Downloaded → Install.\n"
@@ -479,9 +481,9 @@ def page_two(net, lan_url, tls_url, blank_mode, store):
     p.qtile("https://192.168.0.0:8443" if blank_mode else secure,
             size=150, label="QR — the scanner address",
             right_lines=[secure], gap=24)
-    p.space(10)
+    p.space(6)
     p.para("Tap  SCANNER  and allow the camera when the phone asks.", sans(22), DIM)
-    p.space(18)
+    p.space(10)
 
     p.callout("You are done when the phone shows the camera",
               "Tapping SCANNER gives a live camera view and a green Start camera button. "
@@ -495,7 +497,7 @@ def page_two(net, lan_url, tls_url, blank_mode, store):
     p.para("P1 to P4 and Backstore just open the plain http:// address from page 1. "
            "No certificate, no camera, nothing to install on those devices.",
            sans(20), DIM, lh=28)
-    p.space(14)
+    p.space(6)
 
     p.rule()
     p.d.text((M, p.y), "If the camera does not come out", font=sans(26, True), fill=INK)
@@ -516,6 +518,8 @@ def main():
 
     net, port, tls_port = fetch_network()
     store = net.get("store_name") or ""
+    # the same name that goes on the certificate, so staff recognise the profile
+    org = os.environ.get("QMS_CERT_ORG") or "Zairi Khaidzir @ Mozaiz"
 
     # --url lets a sheet be made for a machine that is not this one, or before it
     # exists at all — useful for planning an outlet rollout from head office.
@@ -527,6 +531,8 @@ def main():
             tls_port = sys.argv[i + 1]
         if a == "--store" and i + 1 < len(sys.argv):
             store = sys.argv[i + 1]
+        if a == "--org" and i + 1 < len(sys.argv):
+            org = sys.argv[i + 1]
 
     if override:
         host = override.split("//")[-1].split(":")[0]
@@ -543,12 +549,13 @@ def main():
     print(f"    store    : {store or '(not set)'}")
     print(f"    counters : {lan_url}")
     print(f"    scanner  : {tls_url}")
+    print(f"    issued to: {org}")
     if blank_mode:
         print("    addresses left blank to fill in by hand")
 
     pages = [
         page_one(net, lan_url, blank_mode, store),
-        page_two(net, lan_url, tls_url, blank_mode, store),
+        page_two(net, lan_url, tls_url, blank_mode, store, org),
     ]
 
     pdf = os.path.join(HERE, "qms_install_guide.pdf")

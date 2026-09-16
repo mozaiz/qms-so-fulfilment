@@ -5,7 +5,7 @@
   // Bump this together with CACHE in service-worker.js on every deploy.
   // The UI compares it against the server's version and offers a reload when a
   // phone is still running an older build.
-  var APP_VER = "0.8.0";
+  var APP_VER = "0.8.1";
 
   var POLL_MS = 5000;       // quiet auto-refresh (staff can also hit the refresh button)
   var COOLDOWN_MS = 2500;   // ignore the same barcode re-read within this window

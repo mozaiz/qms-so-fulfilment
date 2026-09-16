@@ -299,7 +299,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.8.1", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:
@@ -1243,6 +1243,9 @@ def ca_mobileconfig():
     import uuid
     b64 = base64.b64encode(der).decode("ascii")
     host = socket.gethostname()
+    # Shows on the iOS profile install screen, so whoever sets the phone up can
+    # see whose certificate this is before they trust it.
+    org = os.environ.get("QMS_CERT_ORG") or "Zairi Khaidzir @ Mozaiz"
     profile = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1252,18 +1255,19 @@ def ca_mobileconfig():
     <dict>
       <key>PayloadCertificateFileName</key><string>qms-ca.crt</string>
       <key>PayloadContent</key><data>{b64}</data>
-      <key>PayloadDescription</key><string>Lets this phone trust the QMS scanner at the store.</string>
+      <key>PayloadDescription</key><string>Lets this phone trust the QMS scanner at the store. Issued by {org}.</string>
       <key>PayloadDisplayName</key><string>QMS Store Certificate Authority</string>
+      <key>PayloadOrganization</key><string>{org}</string>
       <key>PayloadIdentifier</key><string>my.qms.ca.{uuid.uuid4().hex[:12]}</string>
       <key>PayloadType</key><string>com.apple.security.root</string>
       <key>PayloadUUID</key><string>{uuid.uuid4()}</string>
       <key>PayloadVersion</key><integer>1</integer>
     </dict>
   </array>
-  <key>PayloadDescription</key><string>Trust the QMS scanner on the store wifi.</string>
-  <key>PayloadDisplayName</key><string>QMS Store Certificate</string>
+  <key>PayloadDescription</key><string>Trust the QMS scanner on the store wifi. Issued by {org}.</string>
+  <key>PayloadDisplayName</key><string>QMS Store Certificate — {org}</string>
   <key>PayloadIdentifier</key><string>my.qms.profile</string>
-  <key>PayloadOrganization</key><string>{host}</string>
+  <key>PayloadOrganization</key><string>{org}</string>
   <key>PayloadRemovalDisallowed</key><false/>
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>{uuid.uuid4()}</string>

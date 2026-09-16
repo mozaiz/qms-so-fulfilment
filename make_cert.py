@@ -55,6 +55,12 @@ SRV_KEY = os.path.join(CERT_DIR, "server.key")
 LEAF_DAYS = 397
 CA_DAYS = 3650
 
+# Whose certificate this is. It lands in the Organization field of both the CA
+# and the server certificate, so it is what a phone shows when someone opens the
+# certificate details — and it is what appears on the iOS profile install screen.
+# Overridable per store so an outlet can carry the store's own name instead.
+ORG = os.environ.get("QMS_CERT_ORG") or "Zairi Khaidzir @ Mozaiz"
+
 
 def say(msg):
     print("  " + msg)
@@ -96,7 +102,7 @@ def make_ca():
     key = new_key()
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "QMS Store Certificate Authority"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "QMS"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, ORG),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -131,7 +137,7 @@ def make_server(ca_key, ca_cert, names, ips):
     host = socket.gethostname() or "qms"
     name = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, host),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "QMS"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, ORG),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -213,10 +219,27 @@ def main():
             soon = expiry - datetime.datetime.now(datetime.timezone.utc)
             missing_n = names - have_n
             missing_i = ips - have_i
-            if not missing_n and not missing_i and soon.days > 30:
+
+            # The name is part of the certificate, and a certificate's subject
+            # cannot be edited — so a changed name is a changed CA. It has to be
+            # checked HERE, in the same decision as the addresses, or the
+            # "everything is fine" shortcut below returns before anyone notices
+            # and the new name never reaches a single phone.
+            ca_org_changed = False
+            if os.path.exists(CA_CRT):
+                ca = read_cert(CA_CRT)
+                _o = ca.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+                ca_org_changed = (_o[0].value if _o else "") != ORG
+
+            if not missing_n and not missing_i and not ca_org_changed and soon.days > 30:
                 say(f"already valid for {soon.days} more days, covers everything — nothing to do")
+                say(f"issued to {ORG}")
                 return 0
+
             reasons = []
+            if ca_org_changed:
+                reasons.append(f'the name changed to "{ORG}" — this rebuilds the CA, '
+                               f"so every phone must install the certificate again")
             if missing_n:
                 reasons.append("new name(s): " + ", ".join(sorted(missing_n)))
             if missing_i:
@@ -230,14 +253,27 @@ def main():
     # Keep the CA if we already have one. Phones have installed it; throwing it
     # away would silently invalidate every phone in the store and nobody would
     # know why the cameras stopped working.
-    if os.path.exists(CA_CRT) and os.path.exists(CA_KEY) and not force:
+    reuse_ca = os.path.exists(CA_CRT) and os.path.exists(CA_KEY) and not force
+    if reuse_ca:
+        ca_cert = read_cert(CA_CRT)
+        _o = ca_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+        existing_org = _o[0].value if _o else ""
+        if existing_org != ORG:
+            # A certificate's subject cannot be edited, so this is a different
+            # CA. Every phone that installed the old one stops trusting the
+            # server, and the only cure is re-installing on each phone — so say
+            # that plainly rather than swapping it out quietly.
+            say(f'the CA says "{existing_org}" but this install is set to "{ORG}"')
+            say("that is a DIFFERENT certificate authority, not a rename:")
+            say("  every phone that already installed the old one must install the new one")
+            reuse_ca = False
+    if reuse_ca:
         with open(CA_KEY, "rb") as fh:
             ca_key = serialization.load_pem_private_key(fh.read(), password=None)
-        ca_cert = read_cert(CA_CRT)
-        say("keeping the existing CA — phones have already installed it")
+        say(f"keeping the existing CA ({ORG}) — phones have already installed it")
     else:
         ca_key, ca_cert = make_ca()
-        say("created a new certificate authority")
+        say(f"created a new certificate authority for {ORG}")
 
     cert = make_server(ca_key, ca_cert, names, ips)
 

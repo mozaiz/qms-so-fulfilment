@@ -727,6 +727,10 @@ QMS_POS_COUNT=4
 # certificate (see /setup/phone). Plain HTTP on QMS_PORT is unchanged and is
 # where POS and Backstore belong.
 QMS_TLS_PORT=8443
+# Whose name is on the certificate phones install. It shows in the phone's
+# certificate details and on the iOS install screen. Changing it rebuilds the
+# certificate authority, so every phone has to install the certificate again.
+QMS_CERT_ORG="Zairi Khaidzir @ Mozaiz"
 ENV
   chmod 600 "$APP_DIR/qms.env"
   ok "wrote $APP_DIR/qms.env"

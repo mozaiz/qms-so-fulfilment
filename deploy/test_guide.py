@@ -84,6 +84,14 @@ check("it writes a PDF", os.path.exists(pdf), f"{os.path.getsize(pdf)} bytes" if
 print("\n== the pages fit A4 and do not bleed off the sheet ==")
 pages = sorted(f for f in os.listdir(TMP) if re.match(r"qms_install_guide_p\d+\.png$", f))
 check("two pages", len(pages) == 2, ", ".join(pages))
+if len(pages) != 2:
+    # A generator that refuses to write (its own overflow guard) must be reported
+    # as a failure with the reason, not crash the suite on a missing file.
+    print("\n  the generator did not produce two pages — stopping here.")
+    print("  reason:", (r.stdout + r.stderr).strip().splitlines()[-1][:110])
+    shutil.rmtree(TMP, ignore_errors=True)
+    print(f"\nPASSED {len(PASS)} / {len(PASS) + len(FAIL)}")
+    sys.exit(1)
 for i, png in enumerate(pages, 1):
     path = os.path.join(TMP, png)
     im = Image.open(path).convert("L")

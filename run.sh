@@ -36,6 +36,16 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+# Refresh the certificate BEFORE starting. A store box on DHCP changes address,
+# and a certificate that names yesterday's address fails on the phone with no
+# explanation anywhere in the UI. make_cert.py keeps the same CA — so phones stay
+# trusted — and prints "nothing to do" when the addresses have not moved, which
+# is the normal case. Without this, the only cure is someone remembering to run
+# it by hand, months later, when nobody connects the two.
+if [ -f make_cert.py ] && [ -x venv/bin/python ]; then
+  ./venv/bin/python make_cert.py >/dev/null 2>&1 || true
+fi
+
 # Is a port free? Portable, and no dependence on ss/lsof/netstat, which differ
 # or are absent across the machines this runs on.
 port_free() {

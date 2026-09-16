@@ -299,7 +299,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.7.1", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.7.2", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:
@@ -1112,6 +1112,9 @@ def network(request: Request):
         "tls_port": tls_port,
         "tls_ready": has_tls,
         "phone_setup_url": "/setup/phone",
+        # None = no certificate at all; ok:False = it no longer matches this
+        # machine's address, which is the failure nobody can see.
+        "tls_cert": _cert_covers_current() if has_tls else None,
         "store_code": store_code,
         "store_name": store_name,
         "pos_count": n_pos,
@@ -1144,8 +1147,51 @@ def setup_qr(u: str = Query(...), size: int = Query(260, ge=120, le=600)):
 # trust the store's own little certificate authority. These three routes are how
 # it gets there.
 
+def _cert_covers_current():
+    """Does the server certificate name every address this box answers on?
+
+    A store box on DHCP changes address, and the certificate then points at
+    yesterday's. Nothing fails loudly when that happens: the phone shows a
+    certificate error, the server shows nothing at all, and the two are months
+    apart. So state it, and let the UI say it.
+    """
+    path = os.path.join(CERT_DIR, "server.crt")
+    if not os.path.exists(path):
+        return None
+    try:
+        from cryptography import x509
+        with open(path, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        have_ips = {str(i) for i in san.get_values_for_type(x509.IPAddress)}
+        have_names = set(san.get_values_for_type(x509.DNSName))
+    except Exception:
+        return {"ok": False, "reason": "the certificate could not be read"}
+    missing_ips = (set(_lan_addresses()) | {"127.0.0.1"}) - have_ips
+    missing_names = (set(netinfo.local_names()) | {"127.0.0.1"}) - have_names
+    if missing_ips or missing_names:
+        return {
+            "ok": False,
+            "reason": "this machine's address changed after the certificate was made",
+            "missing_ips": sorted(missing_ips),
+            "missing_names": sorted(missing_names),
+        }
+    return {"ok": True}
+
+
 def _ca_paths():
     return (os.path.join(CERT_DIR, "ca.crt"), os.path.join(CERT_DIR, "ca.key"))
+
+
+# Staff will type this from memory, on a phone, standing at a counter. A JSON
+# {"detail":"Not Found"} tells them nothing they can act on. Send the near misses
+# where they meant to go.
+@app.get("/phone/setup", include_in_schema=False)
+@app.get("/phonesetup", include_in_schema=False)
+@app.get("/phone", include_in_schema=False)
+@app.get("/setup", include_in_schema=False)
+def phone_setup_typo():
+    return RedirectResponse("/setup/phone", status_code=307)
 
 
 @app.get("/setup/phone")

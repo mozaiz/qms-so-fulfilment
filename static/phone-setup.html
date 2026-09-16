@@ -194,6 +194,26 @@ state();
 
 fetch("/api/network").then(function (r) { return r.json(); }).then(function (n) {
   net = n;
+
+  // A stale certificate fails on the phone and nowhere else, so the warning has
+  // to be here, before anyone starts installing anything on it.
+  var c = n.tls_cert;
+  if (c && c.ok === false) {
+    var box = document.createElement("div");
+    box.className = "note";
+    box.style.background = "#fff0f0";
+    box.style.borderColor = "#e8b4b4";
+    box.style.color = "#7a1f1f";
+    box.innerHTML = "<b>The store computer's certificate is out of date.</b><br>" +
+      "Its address changed after the certificate was made" +
+      (c.missing_ips && c.missing_ips.length ? " (now " + c.missing_ips.join(", ") + ")" : "") +
+      ", so installing it on this phone will <b>not</b> work yet.<br><br>" +
+      "On the store computer, run:<br><code>sh qms.sh restart</code><br>" +
+      "Then reload this page.";
+    var wrap = document.querySelector(".wrap");
+    wrap.insertBefore(box, document.querySelector(".pick"));
+  }
+
   var https = n.https_url || (n.lan_urls && n.lan_urls[0] || "").replace("http://", "https://");
   document.getElementById("httpsUrl").textContent = https;
   var http = (n.lan_urls && n.lan_urls[0]) || "";

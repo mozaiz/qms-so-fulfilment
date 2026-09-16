@@ -264,6 +264,45 @@ try:
     st2, body2, hdrs2 = get(f"https://{lan_ip}:{TLS_PORT}/setup/ca.crt", ssl_ctx())
     check("the CA is reachable over https too", st2 == 200, f"status={st2}")
 
+    # Staff type this from memory, on a phone, in a hurry.
+    print("\n== near-miss addresses go to the page, not to a JSON 404 ==")
+    for typo in ("/phone/setup", "/phone", "/phonesetup", "/setup"):
+        req = urllib.request.Request(f"http://127.0.0.1:{HTTP_PORT}{typo}")
+        try:
+            r2 = urllib.request.urlopen(req, timeout=8)
+            final = r2.geturl()
+            check(f"{typo} lands on the setup page", final.endswith("/setup/phone"), final)
+        except Exception as e:
+            check(f"{typo} lands on the setup page", False, type(e).__name__)
+
+    # A stale certificate fails on the phone and nowhere else. The app has to say
+    # so, on both the screen where the fix lives and the page the phone opens.
+    print("\n== a certificate that no longer matches this machine is reported ==")
+    st, body, _ = get(f"http://127.0.0.1:{HTTP_PORT}/api/network")
+    net2 = json.loads(body)
+    check("/api/network reports the certificate state", "tls_cert" in net2, str(net2.get("tls_cert"))[:60])
+    check("   ... and it is healthy while the address is unchanged",
+          (net2.get("tls_cert") or {}).get("ok") is True)
+
+    stale = run([PY, "-c", f"""
+import sys, os
+sys.path.insert(0, {REPO!r})
+os.environ['QMS_CERT_DIR'] = {CERT_DIR!r}
+import netinfo, app
+app.CERT_DIR = {CERT_DIR!r}
+real = netinfo.local_ipv4
+netinfo.local_ipv4 = lambda: real() + ['192.168.68.129']   # the box moved
+app._lan_addresses = netinfo.local_ipv4
+print(app._cert_covers_current())
+"""])
+    check("   ... and it DETECTS a moved address", "'ok': False" in stale.stdout, stale.stdout.strip()[:90])
+    check("   ... naming the address it lacks", "192.168.68.129" in stale.stdout)
+
+    st, body, _ = get(f"http://127.0.0.1:{HTTP_PORT}/setup/phone")
+    page2 = body.decode(errors="replace")
+    check("the phone page can show the stale-certificate warning",
+          "certificate is out of date" in page2.lower())
+
 finally:
     for p in procs:
         p.terminate()

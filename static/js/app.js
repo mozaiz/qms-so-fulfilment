@@ -5,7 +5,7 @@
   // Bump this together with CACHE in service-worker.js on every deploy.
   // The UI compares it against the server's version and offers a reload when a
   // phone is still running an older build.
-  var APP_VER = "0.6.2";
+  var APP_VER = "0.6.3";
 
   var POLL_MS = 5000;       // quiet auto-refresh (staff can also hit the refresh button)
   var COOLDOWN_MS = 2500;   // ignore the same barcode re-read within this window
@@ -454,13 +454,24 @@
 
   // ----------------------------------------------------------------- setup
   async function openSetup(from) {
+    // Show the setup screen BEFORE hiding anything else. It used to hide the
+    // login screen and never show this one, so tapping "Setup & Addresses" on
+    // the front page left the user staring at an empty page with no way back —
+    // and the data underneath was loading fine the whole time.
+    show($("screen-setup"), true);
     show($("screen-login"), false);
     $("setupStore").textContent = state.store ? state.store.name : "—";
     state._setupFrom = from;
 
     await loadNetwork();
     var net = state.net;
-    if (!net) { toast("Cannot read server address", "bad"); return; }
+    if (!net) {
+      // The screen is already visible and has a Back button, so say what failed
+      // instead of returning into a page that looks broken.
+      toast("Cannot read the server address — is the server still running?", "bad", 8000);
+      refreshBars();
+      return;
+    }
 
     $("addrLocal").textContent = net.localhost_url;
     $("noteLocal").textContent = net.localhost_note;

@@ -10,7 +10,7 @@
  * Bump CACHE on every deploy. app.js carries a matching APP_VER, and the UI
  * compares it against the server version and offers a reload when they differ.
  */
-const CACHE = "qms-v13";
+const CACHE = "qms-v14";
 const SHELL = [
   "/",
   "/index.html",

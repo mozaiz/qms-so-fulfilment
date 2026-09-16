@@ -78,6 +78,17 @@ echo "        $(echo "$OUT" | grep -o 'PASSED [0-9]* / [0-9]*')"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 
 echo
+echo "== frontend sanity (static, no browser) =="
+if python3 "$SRC/deploy/test_frontend.py" >/tmp/qms-fe.log 2>&1; then
+  chk "frontend suite ALL GREEN" 1
+else
+  chk "frontend suite ALL GREEN" 0
+  tail -12 /tmp/qms-fe.log | sed 's/^/        /'
+fi
+grep -q 'ALL GREEN' /tmp/qms-fe.log && chk "no missing element ids / dead screen transitions" 1 \
+                                       || chk "no missing element ids / dead screen transitions" 0
+
+echo
 echo "== --check: inspect without changing anything =="
 env -i PATH="$REAL_PY_DIR:/usr/local/bin:/usr/bin:/bin" HOME=/tmp \
   bash /tmp/qms-lintest-src/install.sh --check > /tmp/qms-lin-check.log 2>&1

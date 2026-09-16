@@ -79,6 +79,7 @@ jobs:
           QMS_PORT: ${{ matrix.port }}
         run: |
           set -e
+          python deploy/test_frontend.py
           bash deploy/test_install_linux.sh
           python deploy/test_persistence.py
           python deploy/test_lifecycle.py

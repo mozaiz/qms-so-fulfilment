@@ -74,6 +74,10 @@ CHECK_ONLY=0
 export CHECK_ONLY
 
 REPO_SLUG="${QMS_REPO:-mozaiz/qms-so-fulfilment}"
+# Which version to fetch. `main` by default so a new install gets the latest
+# fixes, but an outlet that wants a known-good build can pin a tag:
+#   curl -fsSL <url>/install.sh | QMS_REF=v0.6.3 bash
+QMS_REF="${QMS_REF:-main}"
 
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -117,6 +121,10 @@ do_help() {
   QMS — SO Fulfilment. One command, Linux and macOS.
 
       bash install.sh                 install, or upgrade an existing install
+
+  To install a specific version instead of the latest:
+
+      QMS_REF=v0.6.3 bash install.sh
       bash install.sh --check         inspect this computer, change nothing
       bash install.sh --status        is it running, where is the data
       bash install.sh --uninstall     remove it, KEEP the data
@@ -530,7 +538,8 @@ if [ -z "$SRC_DIR" ]; then
     die "curl is required to download the app, and it is not installed"
   fi
   DL="$(mktemp -d)"
-  curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/main" \
+  # bare <ref> accepts a branch, a tag or a commit sha
+  curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/$QMS_REF" \
     | tar xz -C "$DL" 2>/dev/null \
     || die "could not download the app — check this computer's internet connection"
   SRC_DIR="$(find "$DL" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"

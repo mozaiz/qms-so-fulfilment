@@ -5,7 +5,7 @@
   // Bump this together with CACHE in service-worker.js on every deploy.
   // The UI compares it against the server's version and offers a reload when a
   // phone is still running an older build.
-  var APP_VER = "0.6.5";
+  var APP_VER = "0.6.6";
 
   var POLL_MS = 5000;       // quiet auto-refresh (staff can also hit the refresh button)
   var COOLDOWN_MS = 2500;   // ignore the same barcode re-read within this window
@@ -418,6 +418,7 @@
 
     var target = tab === "stats" ? "stats" : tab === "setup" ? "setup" : tab === "scan" ? "scan" : "board";
     ["scan", "board", "stats", "setup"].forEach(function (n) { show($("screen-" + n), n === target); });
+    if (target === "scan") armGun();
     $("tabbar").querySelectorAll(".tab").forEach(function (b) {
       b.classList.toggle("active", b.dataset.tab === tab);
     });
@@ -631,6 +632,27 @@
   }
 
   // ------------------------------------------------------------------ scan
+  // A USB barcode gun is a keyboard that types the code and presses Enter. It
+  // only works if the Manual Entry field has focus — otherwise every scan is
+  // typed into nothing and staff conclude the scanner is broken.
+  //
+  // At an outlet this is the ONLY reliable way to scan: the camera needs a
+  // secure context, and http://192.168.x.x is not one. Outlets have no HTTPS
+  // and no Tailscale, so phone cameras are off the table there by design. Arm
+  // the field automatically so the gun works without anyone touching a screen.
+  function armGun() {
+    var w = $("manualWrap");
+    if (!w || window.isSecureContext) return;   // camera works here; leave it
+    show(w, true);
+    focusGun();
+  }
+
+  function focusGun() {
+    var w = $("manualWrap"), f = $("manualCode");
+    if (!w || !f || w.classList.contains("hidden")) return;
+    try { f.focus(); } catch (e) { /* not focusable yet; next scan will land */ }
+  }
+
   async function handleScan(soNumber) {
     if (state.submitting) return;
     state.submitting = true;
@@ -647,7 +669,11 @@
         renderResult({ ref_no: "PENDING", so_number: soNumber, offline: true });
         toast("Offline — scan saved", "warn");
       } else { toast(e.message, "bad", 5000); beep(300, 0.25); }
-    } finally { setTimeout(function () { state.submitting = false; }, 600); }
+    } finally {
+      setTimeout(function () { state.submitting = false; }, 600);
+      // ready for the next shot without anyone touching the screen
+      setTimeout(focusGun, 120);
+    }
   }
 
   function renderResult(r) {

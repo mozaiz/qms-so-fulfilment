@@ -76,6 +76,25 @@ if m:
           show_pos != -1 and (await_pos == -1 or show_pos < await_pos),
           f"show at {show_pos}, first await at {await_pos}")
 
+print("\n== the barcode-gun path (the outlet way to scan) ==")
+# At an outlet the page is plain HTTP, so the camera can never work there and a
+# USB gun is the primary input. A gun only works if the field has focus, so the
+# screen must arm it without anyone tapping anything.
+m = re.search(r"function armGun\(\)\s*\{(.*?)\n  \}", js, re.S)
+check("armGun exists", bool(m))
+if m:
+    body = m.group(1)
+    check("armGun refuses to interfere when the camera works",
+          "isSecureContext" in body and "return" in body)
+    check("armGun opens the scan box", 'show(w, true)' in body)
+    check("armGun focuses the field", "focusGun()" in body)
+check("entering the scan screen arms the gun",
+      re.search(r'target === "scan"\)\s*armGun\(\)', js) is not None)
+check("focus is restored after a scan, so shots stay hands-free",
+      re.search(r"setTimeout\(focusGun", js) is not None)
+# and the banner must name the thing that actually works at an outlet
+check("the insecure banner names a barcode scanner", "barcode scanner" in html)
+
 print("\n== asset URLs are version-stamped ==")
 # Cloudflare caches .js/.css by extension for 4 hours and ignores the origin, so
 # any asset served at a fixed URL stays stale at the edge after a deploy. The

@@ -427,11 +427,39 @@ Send that whole block on. It answers most questions before they are asked.
 
 ## Access, and the camera catch
 
-| URL | Secure context | Camera |
+### Why `localhost` works on the QMS computer and nowhere else
+
+`localhost` is not an address on your network. It means **"this device, itself"**.
+Every device has its own, and they never cross the wifi.
+
+So when a phone opens `http://localhost:8099` it is asking *the phone's own port
+8099* — where nothing is running. The server is on the other machine. Nothing is
+broken and nothing is misconfigured; there is simply nothing listening on the
+phone.
+
+Other devices must ask for the **QMS computer**, by an address that actually routes:
+
+```
+On the QMS computer   http://localhost:8099        <- its own loopback
+On any other device   http://192.168.x.x:8099      <- over the wifi
+```
+
+QMS already binds to all interfaces, so LAN access works out of the box — no
+setting to change. The **Setup & Addresses** screen lists every address the
+machine answers on, each with its own QR code, so nobody has to type an IP.
+
+> On **iOS**, `localhost` will fail exactly the same way — it is not an Android
+> versus iOS difference. If a phone cannot reach the app by **LAN address**
+> either, check **iOS Settings → Privacy → Local Network** (Safari needs it), and
+> turn off iCloud Private Relay for that wifi.
+
+### The camera, and what to do at an outlet
+
+| Where the page is opened | Secure context | Camera |
 |---|---|---|
-| `http://localhost:8099` (on the QMS machine) | ✅ | **works** |
-| `http://192.168.x.x:8099` (other devices) | ❌ | blocked |
-| `https://…` (behind a tunnel) | ✅ | works |
+| `http://localhost:8099` on the QMS computer | ✅ | **works** |
+| `http://192.168.x.x:8099` from a phone | ❌ | **blocked — permanently** |
+| `https://…` | ✅ | works |
 
 Browsers only hand over a camera on a **secure context**. `localhost` counts as
 secure; a LAN IP does not. Verified in a real browser:
@@ -442,13 +470,34 @@ localhost      -> isSecureContext True,  mediaDevices object
 https tunnel   -> isSecureContext True,  mediaDevices object
 ```
 
-So the **SCANNER** role belongs on the QMS computer itself — which is also the
-zero-configuration deployment. **POS** and **BACKSTORE** never use the camera, so
-they can be on any phone or tablet. QMS detects the insecure case and shows a
-clear warning instead of silently failing.
+There is no flag, no setting and no workaround for the middle row. Outlets have no
+HTTPS and no IT staff, so **do not plan on phone cameras.** Three things work
+instead:
 
-Want the camera on a phone? Put HTTPS in front (a Cloudflare Tunnel is free), or
-use Manual Entry.
+**1. A USB barcode scanner — the recommended outlet setup.** A "gun" or a desktop
+scanner behaves like a keyboard: it types the SO number and presses Enter. That
+is plain HTTP, no camera, no TLS, no wifi, no internet. Plug it into the store
+computer and it works. Roughly RM50–150, once, and far faster and more reliable
+than a phone camera for 1D barcodes.
+
+QMS is built for this: on a non-HTTPS page it **opens and focuses the scan box by
+itself** and **re-focuses after every scan**, so a full day of scanning needs no
+screen taps at all. Verified by driving the field key-by-key, exactly as a gun does:
+
+```
+after sign-in    manualOpen: True   focused: 'manualCode'   (no taps needed)
+shot 1           SCANNED ✓ #001 MACSO26-00142463
+shot 2           SCANNED ✓ #002 MACSO26-00142464   (still armed)
+```
+
+**2. The camera on the store computer.** The **SCANNER** role at
+`http://localhost:8099` on the machine itself — zero configuration, and the
+fallback if the gun is not there yet.
+
+**3. Manually.** Type the SO number. Always available.
+
+**POS** and **BACKSTORE** never use the camera, so those can be any phone or
+tablet on the store wifi.
 
 ---
 

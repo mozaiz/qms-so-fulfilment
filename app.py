@@ -205,19 +205,36 @@ CREATE INDEX IF NOT EXISTS idx_soevents_req ON so_events(request_id);
 """
 
 
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Add a column, tolerating another process having added it first.
+
+    Between reading the column list and running the ALTER, a second listener
+    starting at the same moment can add the very same column. That is not a
+    failure — it is the migration having been done, which is the outcome we wanted
+    — but SQLite reports it as `duplicate column name` and the naive version
+    crashes the listener. Table and column names here are module constants, never
+    request data.
+    """
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Additive migrations — safe to run on every boot, on an existing database."""
     # v0.5.0: handing an item over became two confirmations — the backstore marks
     # it delivered at the counter, the POS closes it once the customer has it.
     rcols = {r["name"] for r in conn.execute("PRAGMA table_info(so_requests)").fetchall()}
     if "completed_by" not in rcols:
-        conn.execute("ALTER TABLE so_requests ADD COLUMN completed_by INTEGER")
+        _add_column(conn, "so_requests", "completed_by", "INTEGER")
     if "completed_at" not in rcols:
-        conn.execute("ALTER TABLE so_requests ADD COLUMN completed_at TEXT")
+        _add_column(conn, "so_requests", "completed_at", "TEXT")
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stores)").fetchall()}
     if "pos_count" not in cols:
-        conn.execute("ALTER TABLE stores ADD COLUMN pos_count INTEGER NOT NULL DEFAULT 4")
+        _add_column(conn, "stores", "pos_count", "INTEGER NOT NULL DEFAULT 4")
         # an existing store already has staff rows for its POS counters
         have = conn.execute(
             "SELECT COALESCE(MAX(pos_number),0) m FROM staff WHERE role='pos'"
@@ -248,9 +265,13 @@ def init_db() -> None:
         try:
             _init_db_once()
             return
-        except sqlite3.OperationalError as e:
+        except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
+            # The shapes a lost race actually takes, all of which are benign
+            # because the other process did the work:
             msg = str(e).lower()
-            if "locked" not in msg and "busy" not in msg:
+            racing = any(k in msg for k in
+                         ("locked", "busy", "duplicate column", "unique constraint"))
+            if not racing:
                 raise
             last = e
             time.sleep(delay)
@@ -263,15 +284,16 @@ def _init_db_once() -> None:
     try:
         conn.executescript(SCHEMA)
         migrate(conn)
+        # INSERT OR IGNORE then re-read, rather than select-then-insert. The
+        # check-then-act version loses a race with the other listener: both see
+        # no store, both insert, and `code` is UNIQUE so one of them dies at
+        # startup — the same silent dead-listener failure, different exception.
+        conn.execute(
+            "INSERT OR IGNORE INTO stores (code, name, address, pos_count) VALUES (?,?,?,?)",
+            (STORE_CODE, STORE_NAME, "", POS_COUNT),
+        )
         row = conn.execute("SELECT id FROM stores WHERE code = ?", (STORE_CODE,)).fetchone()
-        if row is None:
-            cur = conn.execute(
-                "INSERT INTO stores (code, name, address, pos_count) VALUES (?,?,?,?)",
-                (STORE_CODE, STORE_NAME, "", POS_COUNT),
-            )
-            store_id = cur.lastrowid
-        else:
-            store_id = row["id"]
+        store_id = row["id"]
 
         count = conn.execute(
             "SELECT COUNT(*) c FROM staff WHERE store_id = ?", (store_id,)
@@ -282,8 +304,11 @@ def _init_db_once() -> None:
                 seed.append((store_id, f"POS {n}", f"pos{n}", ROLE_POS, n))
             seed.append((store_id, "Backstore", "backstore", ROLE_BACKSTORE, None))
             seed.append((store_id, "Manager", "manager", ROLE_MANAGER, None))
+            # OR IGNORE for the same reason: `code` is UNIQUE, so whichever
+            # listener loses the race simply finds the row already there.
             conn.executemany(
-                "INSERT INTO staff (store_id, name, code, role, pos_number) VALUES (?,?,?,?,?)",
+                "INSERT OR IGNORE INTO staff (store_id, name, code, role, pos_number) "
+                "VALUES (?,?,?,?,?)",
                 seed,
             )
         conn.commit()
@@ -334,7 +359,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="QMS — SO Fulfilment", version="0.8.6", lifespan=lifespan)
+app = FastAPI(title="QMS — SO Fulfilment", version="0.8.7", lifespan=lifespan)
 
 
 def request_to_dict(r: sqlite3.Row) -> dict:

@@ -88,10 +88,27 @@ connection is active, and that failure ignores the timeout entirely. Starting th
 two together was therefore a race that one of them lost, and the only symptom at
 a store is *"the scanner does not work"*, with the service apparently running.
 
-The app also no longer dies for that: WAL is a persistent property of the database
-rather than of a connection, so the switch is attempted once and tolerated, and
-`init_db` retries a lock failure instead of giving up. Both are covered by
-`deploy/test_persistence.py`.
+The app also no longer dies for that, and losing the race has more than one shape
+— all of which were seen in CI before they were seen at a store:
+
+| what the loser hits | why |
+|---|---|
+| `database is locked` | the journal-mode switch cannot wait for another connection |
+| `duplicate column name: pos_count` | both read the column list, both ALTER |
+| `UNIQUE constraint failed: stores.code` | both see no store, both INSERT |
+
+Each is the other process having done the work, which is the outcome that was
+wanted. So: WAL is attempted once and tolerated (it is a property of the database,
+not of a connection), `ALTER TABLE ADD COLUMN` tolerates the column already being
+there, the store is `INSERT OR IGNORE`-then-read rather than check-then-insert, and
+staff seeding is `INSERT OR IGNORE` against the UNIQUE code. Any of the layers
+alone survives it; all of them together mean a first install cannot half-start.
+
+`deploy/test_persistence.py` covers it with **processes, not threads** — an earlier
+attempt used threads and passed against code that fails every time in CI, because
+the GIL serialises the SQLite calls and the interleaving that loses the race never
+happens. The check now starts four real processes against one fresh database and
+requires all of them to exit cleanly, five times over.
 
 ## Reporting
 

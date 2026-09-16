@@ -192,41 +192,44 @@ p.wait(timeout=10)
 shutil.rmtree(D, ignore_errors=True)
 
 # ---------------------------------------------------------------- startup race
-print("\n== two listeners can start together on a fresh database ==")
+print("\n== four listeners can start on the same fresh database at once ==")
 # run.sh starts the plain and the secure listener, and on a first install both
-# create and migrate the same database. SQLite cannot serialise DDL or a
-# journal-mode switch the way busy_timeout handles ordinary writes, so this race
-# used to kill one of them — and the only symptom at a store is "the scanner does
-# not work", with the service apparently running fine.
+# create, migrate and seed the same database. That is a real race on a fresh
+# install and it used to kill one of them, leaving a store where either the
+# counters or the scanner simply does not answer.
+#
+# PROCESSES, not threads. An earlier version of this check used threads, which
+# pass however badly the app is broken — the GIL serialises the SQLite calls, so
+# the interleaving that actually loses the race never happens. It reported five
+# clean trials against code that fails in CI every time.
 race_db = os.path.join(tempfile.gettempdir(), "qms-race.db")
-for suffix in ("", "-wal", "-shm"):
-    os.path.exists(race_db + suffix) and os.remove(race_db + suffix)
+race_env = dict(os.environ, QMS_DB=race_db, QMS_STORE_CODE="RACE",
+                QMS_STORE_NAME="Race Test")
 
-race_code = (
-    "import os, sys, threading\n"
-    "sys.path.insert(0, os.getcwd())\n"
-    "import app\n"
-    "out = []\n"
-    "def go(tag):\n"
-    "    try:\n"
-    "        app.init_db(); out.append(tag + ':ok')\n"
-    "    except Exception as e:\n"
-    "        out.append(tag + ':' + type(e).__name__)\n"
-    "ts = [threading.Thread(target=go, args=(t,)) for t in ('A', 'B')]\n"
-    "[t.start() for t in ts]\n"
-    "[t.join() for t in ts]\n"
-    "print(' '.join(sorted(out)))\n"
-)
-race = subprocess.run([sys.executable, "-c", race_code], cwd=APP,
-                      env=dict(os.environ, QMS_DB=race_db, QMS_STORE_CODE="RACE",
-                               QMS_STORE_NAME="Race Test"),
-                      capture_output=True, text=True, timeout=120)
-if race.stdout.strip() != "A:ok B:ok":
-    print(f"        got: {race.stdout.strip()!r}  {race.stderr.strip()[-120:]}")
-check("both initialisations survive a simultaneous start",
-      race.stdout.strip() == "A:ok B:ok")
+BOOT = ("import os, sys; sys.path.insert(0, os.getcwd()); "
+        "import app; app.init_db()")
+
+trials_clean = 0
+TRIALS, WORKERS = 5, 4
+for trial in range(TRIALS):
+    for suffix in ("", "-wal", "-shm"):
+        os.path.exists(race_db + suffix) and os.remove(race_db + suffix)
+    # start them as close together as possible
+    procs = [subprocess.Popen([sys.executable, "-c", BOOT], cwd=APP, env=race_env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+             for _ in range(WORKERS)]
+    outs = [p.communicate(timeout=90) for p in procs]
+    bad = [(p.returncode, (o + e).decode(errors="replace").strip().splitlines()[-1:])
+           for p, (o, e) in zip(procs, outs) if p.returncode != 0]
+    if bad:
+        print(f"        trial {trial + 1}: FAILED — {bad[0][0]} rc, {bad[0][1]}")
+    else:
+        trials_clean += 1
+        print(f"        trial {trial + 1}: all {WORKERS} exited cleanly")
 for suffix in ("", "-wal", "-shm"):
     os.path.exists(race_db + suffix) and os.remove(race_db + suffix)
+check(f"all {TRIALS} rounds of {WORKERS} simultaneous boots succeeded",
+      trials_clean == TRIALS)
 
 print("\n" + "=" * 52)
 print(f"PASSED {len(PASS)} / {len(PASS) + len(FAIL)}")

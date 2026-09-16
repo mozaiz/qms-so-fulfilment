@@ -614,10 +614,20 @@ elif [ -z "$SRC_DIR" ]; then
   die "No checkout to install from. Run this from the unzipped QMS folder."
 else
   if have rsync; then
+    # Everything the running install OWNS and the release does not ship must be
+    # excluded. --delete without these wipes the operator's configuration and
+    # logs on every upgrade, and the installer then helpfully writes a fresh
+    # qms.env — so an outlet silently loses its store code, port and thresholds.
     rsync -a --delete \
       --exclude venv --exclude '*.db*' \
       --exclude __pycache__ --exclude .git --exclude screens \
       --exclude 'test_barcodes.png' \
+      --exclude qms.env \
+      --exclude 'qms*.log' \
+      --exclude 'qms*.err.log' \
+      --exclude '*.err' \
+      --exclude backups \
+      --exclude qr_card_* \
       "$SRC_DIR"/ "$APP_DIR"/
   else
     for f in app.py requirements.txt run.sh install.sh; do

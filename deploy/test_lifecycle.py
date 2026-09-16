@@ -160,10 +160,26 @@ check("DATA KEPT        (backups/)", os.path.isdir(f"{APP}/backups"))
 check("says the data was kept on purpose", "kept on purpose" in r.stdout)
 
 print("\n== re-install over the top ==")
+# Customise the settings the way an operator would, so the upgrade has something
+# real to lose. Checking that qms.env merely EXISTS is what let a rsync --delete
+# wipe every outlet's configuration on upgrade while the suite stayed green.
+cfg = open(f"{APP}/qms.env").read()
+cfg = cfg.replace("QMS_STALE_MIN=15", "QMS_STALE_MIN=25")
+# regex, not a literal: the value depends on what the installer was given
+cfg = re.sub(r'^QMS_STORE_CODE=.*$', 'QMS_STORE_CODE="KEEP01"', cfg, flags=re.M)
+assert "KEEP01" in cfg, "failed to customise the store code before the upgrade"
+open(f"{APP}/qms.env", "w").write(cfg)
+open(f"{APP}/qms.log", "w").write("operator log line\n")
+
 r = sh(["bash", "install.sh"], cwd=SRC, env=install_env())
 check("re-install exits 0", r.returncode == 0)
 check("app.py is back", os.path.exists(f"{APP}/app.py"))
-check("qms.env was NOT overwritten", os.path.exists(f"{APP}/qms.env"))
+
+after = open(f"{APP}/qms.env").read()
+check("upgrade KEEPS a customised threshold", "QMS_STALE_MIN=25" in after)
+check("upgrade KEEPS a customised store code", 'QMS_STORE_CODE="KEEP01"' in after)
+check("upgrade keeps the log", os.path.exists(f"{APP}/qms.log"))
+check("upgrade keeps backups/", os.path.isdir(f"{APP}/backups"))
 p = boot()
 _, tok2 = call("POST", "/api/login", {"role": "scanner"})
 _, env1 = call("GET", "/api/v1/requests?view=today", token=tok2["token"])

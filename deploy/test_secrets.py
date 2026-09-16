@@ -36,7 +36,9 @@ PATTERNS = [
     ("Tailscale key", r"tskey-[A-Za-z0-9]{10,}"),
     ("Telegram bot token", r"[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}"),
     ("private key block", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    ("Cloudflare token", r"[A-Za-z0-9_-]{40}[0-9a-f]{0}$"),
+    # No Cloudflare/Stripe/generic entry on purpose. A pattern for "40 random
+    # characters" matches minified JS, hashes and base64, and a check that cries
+    # wolf is a check somebody eventually disables. Named-vendor shapes only.
 ]
 
 # Assignment of a literal to something credential-shaped. `password=None` and

@@ -82,19 +82,39 @@ jobs:
         env:
           QMS_PORT: ${{ matrix.port }}
         run: |
-          set -e
-          python deploy/test_frontend.py
-          python deploy/test_readme.py
-          python deploy/test_https.py
-          python deploy/test_guide.py
-          python deploy/test_secrets.py
+          # Each suite on its own line of output, and the failing one printed in
+          # full. A bare "exit code 1" from a ten-suite block costs an hour of
+          # guessing, and on this repo the log is not always readable — so make CI
+          # say which suite broke and what it said.
+          fail=0
+          run_one() {
+            local label="$1"; shift
+            local out="/tmp/ci-$(echo "$label" | tr -cd 'a-zA-Z0-9').log"
+            if "$@" >"$out" 2>&1; then
+              printf '\n  PASS  %s  --  %s\n' "$label" "$(grep -oE 'PASSED [0-9]+ / [0-9]+' "$out" | tail -1)"
+            else
+              printf '\n  FAIL  %s  (exit %d)\n' "$label" "$?"
+              echo "  ------------------------------------------------"
+              tail -40 "$out" | sed 's/^/  /'
+              echo "  ------------------------------------------------"
+              fail=1
+            fi
+          }
+
+          run_one frontend   python deploy/test_frontend.py
+          run_one readme     python deploy/test_readme.py
+          run_one https      python deploy/test_https.py
+          run_one guide      python deploy/test_guide.py
+          run_one secrets    python deploy/test_secrets.py
           # The release archives ship whatever this produces. A file missing here
           # is an outlet downloading an app that cannot boot, and it would only be
           # discovered at tag time — so build the archive on every push.
-          python deploy/package.py ci-test
-          bash deploy/test_install_linux.sh
-          python deploy/test_persistence.py
-          python deploy/test_lifecycle.py
+          run_one package    python deploy/package.py ci-test
+          run_one installer  bash deploy/test_install_linux.sh
+          run_one persistence python deploy/test_persistence.py
+          run_one lifecycle  python deploy/test_lifecycle.py
+
+          exit $fail
 
       - name: Server log on failure
         if: failure()

@@ -32,8 +32,25 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO not in _sys.path:
     _sys.path.insert(0, REPO)
 PY = sys.executable
-HTTP_PORT = int(os.environ.get("QMS_TEST_HTTP_PORT", "8303"))
-TLS_PORT = int(os.environ.get("QMS_TEST_TLS_PORT", "8444"))
+
+
+def free_port():
+    """Ask the OS for an unused port.
+
+    Hard-coding a test port is how a suite passes alone and fails in a batch: the
+    run where something else holds it fails four sections later, as a bare
+    status=None that says nothing about the real cause.
+    """
+    import socket as _s
+    s = _s.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+HTTP_PORT = int(os.environ.get("QMS_TEST_HTTP_PORT") or free_port())
+TLS_PORT = int(os.environ.get("QMS_TEST_TLS_PORT") or free_port())
 
 PASS, FAIL = [], []
 TMP = tempfile.mkdtemp(prefix="qms-https-")
@@ -173,26 +190,48 @@ env = dict(os.environ, QMS_PORT=str(HTTP_PORT), QMS_TLS_PORT=str(TLS_PORT),
            QMS_STORE_NAME="TLS Test", QMS_CERT_DIR=CERT_DIR)
 procs = []
 try:
+    # Keep their output. A server that refuses to start is the failure this suite
+    # exists to catch, and swallowing its stderr turns that into a mystery.
+    tls_log = open(os.path.join(TMP, "tls-server.log"), "w+")
+    http_log = open(os.path.join(TMP, "http-server.log"), "w+")
     procs.append(subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--host", "0.0.0.0",
          "--port", str(TLS_PORT), "--ssl-keyfile", srv_key, "--ssl-certfile", srv_crt,
-         "--log-level", "warning"], cwd=REPO, env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+         "--log-level", "warning"], cwd=REPO, env=env, stdout=tls_log, stderr=tls_log))
     procs.append(subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--host", "0.0.0.0",
          "--port", str(HTTP_PORT), "--log-level", "warning"], cwd=REPO, env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        stdout=http_log, stderr=http_log))
 
     lan_ip = (netinfo.local_ipv4() or ["127.0.0.1"])[0]
-    up = False
-    for _ in range(40):
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}/api/health", timeout=2)
-            up = True
-            break
-        except Exception:
-            time.sleep(1)
-    check("the servers came up", up)
+    def wait_for(url, ctx=None, tries=40):
+        for _ in range(tries):
+            try:
+                urllib.request.urlopen(url, timeout=2, context=ctx)
+                return True
+            except Exception:
+                time.sleep(1)
+        return False
+
+    up = wait_for(f"http://127.0.0.1:{HTTP_PORT}/api/health")
+    check("the plain server came up", up)
+
+    # The TLS listener is the entire subject of this suite, so prove it answered
+    # rather than inferring it from the plain one. Without its own readiness check
+    # a TLS start failure shows up later as an unrelated-looking status=None.
+    tls_up = wait_for(f"https://127.0.0.1:{TLS_PORT}/api/health", ssl_ctx(), tries=25)
+    check("the secure server came up", tls_up,
+          "" if tls_up else "it never answered — see the server output below")
+
+    if not (up and tls_up):
+        for name, fh in (("secure", tls_log), ("plain", http_log)):
+            fh.flush()
+            fh.seek(0)
+            body = fh.read().strip()
+            if body:
+                print(f"  ---- {name} server output ----")
+                for line in body.splitlines()[-15:]:
+                    print("    " + line)
 
     # trusted with the CA — exactly what the phone will do after installing it
     try:

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Use this phone as a scanner — QMS</title>
+<style>
+  :root { --ink:#0d1117; --dim:#5f6978; --line:#e3e7ee; --accent:#2f81f7;
+          --good:#1a7f37; --warn:#9a6700; --warnbg:#fff8e6; --bg:#f6f8fa; }
+  * { box-sizing:border-box; -webkit-text-size-adjust:100%; }
+  body { margin:0; padding:20px 16px 48px; background:var(--bg); color:var(--ink);
+         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:600px; margin:0 auto; }
+  h1 { font-size:23px; margin:0 0 6px; letter-spacing:-.02em; }
+  .sub { color:var(--dim); margin:0 0 20px; font-size:15px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px;
+          padding:18px; margin:0 0 14px; }
+  .stepn { display:inline-flex; width:26px; height:26px; border-radius:50%;
+           background:var(--ink); color:#fff; align-items:center; justify-content:center;
+           font-size:14px; font-weight:600; margin-right:9px; flex:0 0 auto; }
+  .step { display:flex; align-items:flex-start; margin:0 0 16px; }
+  .step:last-child { margin-bottom:0; }
+  .step .body { flex:1; padding-top:2px; }
+  .btns { margin-top:12px; display:flex; flex-direction:column; gap:9px; }
+  a.btn { display:block; text-align:center; padding:15px 16px; border-radius:10px;
+          background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }
+  a.btn.alt { background:#fff; color:var(--accent); border:1.5px solid var(--accent); }
+  code { background:#eef1f5; padding:2px 6px; border-radius:5px; font-size:14px;
+         word-break:break-all; }
+  .url { font-size:19px; font-weight:600; word-break:break-all; }
+  .note { background:var(--warnbg); border:1px solid #f0e0b0; color:#5a4a10;
+          border-radius:10px; padding:13px 15px; font-size:14.5px; margin:0 0 16px; }
+  .ok { color:var(--good); font-weight:600; }
+  .dim { color:var(--dim); }
+  .tiny { font-size:13.5px; }
+  .qr { text-align:center; margin:14px 0 0; }
+  .qr img { width:190px; height:190px; image-rendering:pixelated; }
+  .os { display:none; }
+  .os.on { display:block; }
+  .pick { display:flex; gap:9px; margin:0 0 18px; }
+  .pick button { flex:1; padding:13px; border-radius:10px; border:1.5px solid var(--line);
+                 background:#fff; font-size:15px; font-weight:600; color:var(--ink);
+                 font-family:inherit; }
+  .pick button.sel { border-color:var(--accent); background:#eef5ff; color:var(--accent); }
+  h2 { font-size:17px; margin:0 0 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Use this phone as a scanner</h1>
+  <p class="sub">A browser only gives a camera to a page it trusts. Setting this up
+     takes about a minute, once per phone — after that the camera works for good,
+     with no internet needed.</p>
+
+  <div class="pick">
+    <button id="btnIos"     onclick="pick('ios')">iPhone / iPad</button>
+    <button id="btnAndroid" onclick="pick('android')">Android</button>
+  </div>
+
+  <div class="card">
+    <div class="step">
+      <span class="stepn">1</span>
+      <div class="body"><b>Install the store certificate</b>
+        <div class="btns">
+          <a class="btn" id="dlProfile" href="#">Install certificate</a>
+        </div>
+        <p class="tiny dim" style="margin:10px 0 0" id="dlHint"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- iOS ---------------- -->
+  <div class="os" id="osIos">
+    <div class="card">
+      <h2>iPhone &amp; iPad — two taps after installing</h2>
+      <div class="step"><span class="stepn">2</span><div class="body">
+        <b>Settings</b> → <b>Profile Downloaded</b> → <b>Install</b> (top right) → <b>Install</b> → enter your passcode.
+      </div></div>
+      <div class="step"><span class="stepn">3</span><div class="body">
+        <b>Settings</b> → <b>General</b> → <b>About</b> → scroll to the bottom →
+        <b>Certificate Trust Settings</b> → turn <b>ON</b> the switch next to
+        <b>QMS Store Certificate Authority</b>.
+        <p class="tiny" style="margin:8px 0 0;color:#9a6700">
+          <b>Do not skip this step.</b> Installing alone is not enough — Apple
+          requires the extra switch before Safari will trust it.</p>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- ---------------- Android ---------------- -->
+  <div class="os" id="osAndroid">
+    <div class="card">
+      <h2>Android — what to expect</h2>
+      <div class="step"><span class="stepn">2</span><div class="body">
+        Android may warn that the file could harm your device. Choose
+        <b>Continue</b> / <b>Install anyway</b>. It is the store's own certificate,
+        generated on the store computer.
+      </div></div>
+      <div class="step"><span class="stepn">3</span><div class="body">
+        Name it <code>QMS</code> when asked, and choose <b>CA certificate</b> if
+        Android offers a choice. You will be asked to confirm your screen lock.
+      </div></div>
+      <div class="step"><span class="stepn">4</span><div class="body">
+        Some Android phones need this instead — in Chrome, open
+        <code>chrome://flags</code>, search for
+        <code>unsafely-treat-insecure-origin-as-secure</code>, paste the
+        <b>http</b> address below, and relaunch Chrome.
+        <span class="dim">That skips the certificate entirely.</span>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- ---------------- shared ---------------- -->
+  <div class="card">
+    <div class="step"><span class="stepn" id="lastN">4</span><div class="body">
+      <b>Open the secure address and sign in as SCANNER</b>
+      <p class="url" id="httpsUrl" style="margin:8px 0 0">…</p>
+      <p class="tiny dim" style="margin:6px 0 0" id="httpUrl"></p>
+      <div class="qr"><img id="qrImg" alt="QR code for the secure address"></div>
+      <p class="tiny dim" style="margin:8px 0 0;text-align:center">Or scan this from the phone</p>
+      <p class="tiny" style="margin:14px 0 0">
+        <span id="stateIcon">…</span> <span id="stateText"></span>
+      </p>
+    </div></div>
+  </div>
+
+  <div class="note">
+    <b>Keep using the secure address for scanning.</b> The other address (plain
+    <code>http://</code>) still works for POS and Backstore on any device — they
+    never need the camera.
+  </div>
+
+  <div class="card tiny dim">
+    <b style="color:var(--ink)">Not working?</b>
+    <div style="margin-top:8px">
+      • <b>Camera still blocked on an iPhone</b> — almost always step 3. Check
+      Settings → General → About → Certificate Trust Settings is switched on.<br>
+      • <b>"Cannot connect"</b> — the phone must be on the same wifi as the store
+      computer, and must use the address above, not <code>localhost</code>.
+      <code>localhost</code> means "this phone" and will never work.<br>
+      • <b>Certificate error after a while</b> — the store computer's IP address
+      changed. Re-run the certificate helper on the store computer.
+    </div>
+  </div>
+</div>
+
+<script>
+var net = null, chosen = null;
+
+function pick(os) {
+  chosen = os;
+  document.getElementById("osIos").classList.toggle("on", os === "ios");
+  document.getElementById("osAndroid").classList.toggle("on", os === "android");
+  document.getElementById("btnIos").classList.toggle("sel", os === "ios");
+  document.getElementById("btnAndroid").classList.toggle("sel", os === "android");
+  document.getElementById("lastN").textContent = os === "ios" ? "4" : "5";
+  var p = document.getElementById("dlProfile");
+  // the .mobileconfig is what iOS understands; Android wants the plain cert
+  p.href = "/setup/ca.mobileconfig";
+  p.textContent = os === "ios" ? "Install certificate" : "Download certificate";
+  document.getElementById("dlHint").textContent = os === "ios"
+    ? "Opens the Settings profile installer."
+    : "Saves ca.crt — open it from Downloads to install.";
+  try { localStorage.setItem("qms-os", os); } catch (e) {}
+}
+
+// guess from the user agent so most people need no tap at all
+(function () {
+  var ua = navigator.userAgent || "";
+  var saved = null;
+  try { saved = localStorage.getItem("qms-os"); } catch (e) {}
+  var guess = saved || (/iPad|iPhone|iPod/.test(ua) ? "ios" : (/Android/.test(ua) ? "android" : "ios"));
+  pick(guess);
+})();
+
+function state() {
+  var icon = document.getElementById("stateIcon");
+  var text = document.getElementById("stateText");
+  if (window.isSecureContext) {
+    icon.textContent = "✅";
+    text.innerHTML = "This page is already secure — the camera will work. " +
+                     "Sign in as SCANNER and allow the camera when asked.";
+  } else {
+    icon.textContent = "🔒";
+    text.innerHTML = "You are on the plain (not secure) address, so the camera is " +
+                     "blocked <b>on this page</b>. Install the certificate, then open " +
+                     "the secure address above.";
+  }
+}
+state();
+
+fetch("/api/network").then(function (r) { return r.json(); }).then(function (n) {
+  net = n;
+  var https = n.https_url || (n.lan_urls && n.lan_urls[0] || "").replace("http://", "https://");
+  document.getElementById("httpsUrl").textContent = https;
+  var http = (n.lan_urls && n.lan_urls[0]) || "";
+  document.getElementById("httpUrl").textContent = http ? "or " + http + " without the camera" : "";
+  if (https) {
+    document.getElementById("qrImg").src =
+      "/setup/qr.png?u=" + encodeURIComponent(https) + "&size=380";
+  }
+}).catch(function () {});
+</script>
+</body>
+</html>

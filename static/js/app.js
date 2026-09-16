@@ -5,7 +5,7 @@
   // Bump this together with CACHE in service-worker.js on every deploy.
   // The UI compares it against the server's version and offers a reload when a
   // phone is still running an older build.
-  var APP_VER = "0.6.6";
+  var APP_VER = "0.7.0";
 
   var POLL_MS = 5000;       // quiet auto-refresh (staff can also hit the refresh button)
   var COOLDOWN_MS = 2500;   // ignore the same barcode re-read within this window
@@ -496,6 +496,24 @@
       $("qrLan").src = "/setup/qr.png?u=" + encodeURIComponent(pick) + "&size=200";
     } else {
       show($("qrLan").parentNode, false);
+    }
+
+    // The secure address is the only one a phone camera works on, so show it as
+    // its own address with its own QR rather than leaving staff to guess which
+    // of the plain ones to try. Hidden entirely until a certificate exists.
+    var box = $("phoneBox");
+    if (box) {
+      var tls = net.https_urls || [];
+      var tbest = tls.filter(function (u) {
+        return /\/\/192\.168\.|^https:\/\/10\.|^https:\/\/172\.(1[6-9]|2\d|3[01])\./.test(u);
+      });
+      var tpick = (tbest.length ? tbest : tls)[0] || "";
+      show(box, !!tpick);
+      if (tpick) {
+        $("addrTls").textContent = tpick;
+        $("noteTls").textContent = net.https_note || "";
+        $("qrTls").src = "/setup/qr.png?u=" + encodeURIComponent(tpick) + "&size=200";
+      }
     }
 
     $("abStore").textContent = net.store_code;

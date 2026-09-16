@@ -279,7 +279,8 @@ do_uninstall() {
     printf '    next time run --uninstall without --purge and keep qms.db.\n\n'
   else
     # Remove the program, leave the data where a re-install will find it.
-    for f in app.py requirements.txt run.sh install.sh qms.sh qms-backup.sh \
+    for f in app.py netinfo.py make_cert.py requirements.txt run.sh install.sh \
+             qms.sh qms-backup.sh \
              make_test_barcodes.py make_qr_card.py make_preview.py seed_demo.py \
              test_flow.py README.md INSTALL.md LICENSE START-HERE.txt \
              Dockerfile docker-compose.yml qms.env.example; do
@@ -639,7 +640,11 @@ else
       --exclude qr_card_* \
       "$SRC_DIR"/ "$APP_DIR"/
   else
-    for f in app.py requirements.txt run.sh install.sh; do
+    # Keep this list complete: it is the non-tar fallback path, and anything
+    # missing here produces an install that boots into a broken app.
+    for f in app.py netinfo.py make_cert.py requirements.txt run.sh install.sh \
+             qms.sh qms-backup.sh make_qr_card.py make_test_barcodes.py \
+             seed_demo.py test_flow.py README.md INSTALL.md LICENSE START-HERE.txt; do
       [ -f "$SRC_DIR/$f" ] && cp "$SRC_DIR/$f" "$APP_DIR"/
     done
     cp -r "$SRC_DIR/static" "$APP_DIR"/
@@ -678,6 +683,25 @@ else
   printf '\n    Full traceback: %s\n' "$_import_err"
   die "Refusing to install a version of QMS that cannot start."
 fi
+_cert_log="$(mktemp 2>/dev/null || echo "$APP_DIR/.cert.log")"
+
+# ------------------------------------------------- 3b. certificate for phones
+# A browser only gives a page a camera on a secure context, and a LAN IP over
+# plain HTTP is not one. Without this step nobody can scan with a phone camera
+# and there is no way around it — so generate the store's own certificate
+# authority now, quietly, and let each phone install it later in one tap.
+say "Certificate for phone scanning"
+if ./venv/bin/python make_cert.py >"$_cert_log" 2>&1; then
+  sed 's/^/    /' "$_cert_log"
+  ok "certificate ready — phones scan on https://<this-machine>:${QMS_TLS_PORT:-8443}"
+else
+  # Not fatal: the plain-HTTP app is still fully usable by POS and Backstore,
+  # and a store that cannot scan with a camera can still scan with a barcode gun.
+  printf '\n'
+  sed 's/^/        /' "$_cert_log"
+  warn "could not create a certificate — QMS will run on plain HTTP only"
+  warn "POS and Backstore are unaffected. Re-run the installer to retry."
+fi
 
 # ---------------------------------------------------------------- 4. config
 if [ ! -f "$APP_DIR/qms.env" ]; then
@@ -696,6 +720,11 @@ QMS_SLA_MIN=10
 QMS_COMPLETE_MIN=10
 # How many POS counters exist by default (add more later from the Setup screen):
 QMS_POS_COUNT=4
+# Secure port for phone scanning. A camera needs a secure context, and a LAN IP
+# over plain HTTP is not one, so phones scan here after installing the store
+# certificate (see /setup/phone). Plain HTTP on QMS_PORT is unchanged and is
+# where POS and Backstore belong.
+QMS_TLS_PORT=8443
 ENV
   chmod 600 "$APP_DIR/qms.env"
   ok "wrote $APP_DIR/qms.env"
@@ -704,6 +733,7 @@ else
 fi
 set -a; . "$APP_DIR/qms.env"; set +a
 QMS_PORT="${QMS_PORT:-8099}"
+QMS_TLS_PORT="${QMS_TLS_PORT:-8443}"
 
 # ---------------------------------------------------------------- 5. service
 say "Service"
@@ -1085,6 +1115,14 @@ done
 say "Done"
 VER="$(curl -fsS --max-time 3 "http://127.0.0.1:$QMS_PORT/api/health" 2>/dev/null \
         | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)"
+# The secure port is the one that matters for scanning, so check it rather than
+# assuming. curl -k: we are testing that it serves, not that curl trusts our CA.
+TLS_READY=0
+if [ -f "$APP_DIR/certs/server.crt" ]; then
+  if curl -fsSk --max-time 5 "https://127.0.0.1:$QMS_TLS_PORT/api/health" >/dev/null 2>&1; then
+    TLS_READY=1
+  fi
+fi
 if [ "$READY" = "1" ]; then
   ok "QMS is answering on port $QMS_PORT${VER:+  (v$VER)}"
 else
@@ -1103,6 +1141,14 @@ else
   fi
   printf '\n'
 fi
+if [ -f "$APP_DIR/certs/server.crt" ]; then
+  if [ "$TLS_READY" = "1" ]; then
+    ok "phone scanning is ready on port $QMS_TLS_PORT (https)"
+  else
+    warn "the secure port $QMS_TLS_PORT is not answering — phone scanning will not work yet"
+    warn "check $APP_DIR/qms.err.log, or run: sh $APP_DIR/qms.sh doctor"
+  fi
+fi
 
 cat <<SUMMARY
 
@@ -1111,8 +1157,17 @@ cat <<SUMMARY
       Use the SCANNER role on this machine.
 
     Open on other devices :  http://${IP:-<this-computer-ip>}:$QMS_PORT
-      No camera over plain http — those devices use Manual Entry.
-      POS 1..4 and BACKSTORE are all tap-only, so this is fine.
+      No camera over plain http. POS 1..4 and BACKSTORE are tap-only, so this
+      address is all they need.
+
+    SCAN WITH A PHONE CAMERA  ->  https://${IP:-<this-computer-ip>}:$QMS_TLS_PORT
+      A camera needs a secure address, and plain http is not one — so the
+      SCANNER role uses this one. Each phone installs the store certificate
+      ONCE, then the camera works for good, with no internet needed.
+
+      Send staff here to set it up (takes about a minute per phone):
+
+          http://${IP:-<this-computer-ip>}:$QMS_PORT/setup/phone
 
     Store code : $STORE_CODE
     Config     : $APP_DIR/qms.env

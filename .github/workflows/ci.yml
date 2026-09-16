@@ -81,6 +81,7 @@ jobs:
           set -e
           python deploy/test_frontend.py
           python deploy/test_readme.py
+          python deploy/test_https.py
           bash deploy/test_install_linux.sh
           python deploy/test_persistence.py
           python deploy/test_lifecycle.py

@@ -13,3 +13,9 @@ eval_type_backport>=0.2 ; python_version < "3.10"
 # of typing an IP). The app degrades gracefully if Pillow is missing.
 qrcode>=7.4
 pillow>=10.0
+# Generates the local certificate authority and server certificate that let a
+# phone camera work (a browser only gives a camera on a secure context, and a
+# LAN IP over plain HTTP is not one). Only needed for HTTPS, but it is a small
+# single wheel and leaving it out means the phone-scanning path is missing on a
+# fresh install.
+cryptography>=42.0

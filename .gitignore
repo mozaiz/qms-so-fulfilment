@@ -12,6 +12,13 @@ __pycache__/
 *.py[cod]
 qms.env
 
+# --- the store's certificate authority and server keys ----------------------
+# ca.key can sign a certificate for ANY hostname on earth. It belongs on one
+# store box and nowhere else — committing it would let anyone impersonate any
+# site to every phone that installed the CA.
+certs/
+*.mobileconfig
+
 # --- generated output -------------------------------------------------------
 screens/
 qr_card_*.png

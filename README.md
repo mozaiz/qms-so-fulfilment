@@ -340,6 +340,41 @@ D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; curl -s "http://127.0.0.1:8099/api/hea
 If that says a newer version than the screen does, it is the client. Nothing is
 broken on the server.
 
+### The phone still cannot use the camera after installing the certificate
+
+Work down this list — each one is common and each has a different fix.
+
+**1. Are you on the `https://` address?** The certificate does not change anything
+on `http://192.168.x.x`; that address can never have a camera. Open
+`/setup/phone` again and use the secure address it gives you.
+
+**2. iPhone: is Full Trust switched on?** Installing the profile is only half of
+it. Check **Settings → General → About → Certificate Trust Settings** and make
+sure the switch next to **QMS Store Certificate Authority** is green. This is the
+single most common cause.
+
+**3. Is the phone on the store wifi?** A phone on mobile data cannot reach
+`192.168.x.x` at all.
+
+**4. Did the store box change address?** Then the certificate no longer matches:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; cd "$D" && ./venv/bin/python make_cert.py && sh qms.sh restart
+```
+
+**5. Is the secure port answering at all?**
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; curl -k -s -o /dev/null -w "%{http_code}\n" "https://127.0.0.1:8443/api/health"
+```
+
+`200` means the server is fine and the problem is the phone. `000` means the
+server — read the doctor output.
+
+**6. Android only:** skip the certificate entirely. Chrome →
+`chrome://flags` → `unsafely-treat-insecure-origin-as-secure` → paste the **http**
+address → relaunch.
+
 ### "Camera unavailable" or the camera does nothing
 
 The browser only hands over a camera on a **secure context**.
@@ -453,36 +488,67 @@ machine answers on, each with its own QR code, so nobody has to type an IP.
 > either, check **iOS Settings → Privacy → Local Network** (Safari needs it), and
 > turn off iCloud Private Relay for that wifi.
 
-### The camera, and what to do at an outlet
-
-| Where the page is opened | Secure context | Camera |
-|---|---|---|
-| `http://localhost:8099` on the QMS computer | ✅ | **works** |
-| `http://192.168.x.x:8099` from a phone | ❌ | **blocked — permanently** |
-| `https://…` | ✅ | works |
+### Scanning with a phone camera — how it actually works
 
 Browsers only hand over a camera on a **secure context**. `localhost` counts as
-secure; a LAN IP does not. Verified in a real browser:
+secure; a LAN IP over plain HTTP does not. Measured in a real browser against a
+real QMS:
 
 ```
-localhost      -> isSecureContext True,  mediaDevices object
-192.168.0.25   -> isSecureContext False, mediaDevices undefined
-https tunnel   -> isSecureContext True,  mediaDevices object
+A  http://192.168.0.25:8099       isSecureContext False   mediaDevices missing
+B  https://… (untrusted cert)     isSecureContext False   mediaDevices missing
+C  https://… (store CA installed) isSecureContext True    mediaDevices present
 ```
 
-There is no flag, no setting and no workaround for the middle row. Outlets have no
-HTTPS and no IT staff, so **do not plan on phone cameras.** Three things work
-instead:
+Row **B** is the one that catches people out. Tapping through a certificate
+warning does **not** help — and on **iOS it never will**, because Safari does not
+expose `navigator.mediaDevices` at all on a page whose certificate it does not
+fully trust. That is a deliberate Apple security decision, not a bug to work
+around. The phone has to genuinely trust the server.
 
-**1. A USB barcode scanner — the recommended outlet setup.** A "gun" or a desktop
-scanner behaves like a keyboard: it types the SO number and presses Enter. That
-is plain HTTP, no camera, no TLS, no wifi, no internet. Plug it into the store
-computer and it works. Roughly RM50–150, once, and far faster and more reliable
-than a phone camera for 1D barcodes.
+So QMS runs its **own tiny certificate authority** — created by the installer,
+kept on the store box, never sent anywhere.
 
-QMS is built for this: on a non-HTTPS page it **opens and focuses the scan box by
-itself** and **re-focuses after every scan**, so a full day of scanning needs no
-screen taps at all. Verified by driving the field key-by-key, exactly as a gun does:
+### Setting up a phone — one minute, once per phone
+
+Send staff to this address **on the phone** (plain HTTP is fine to start — this is
+the one page that must work before the phone trusts anything):
+
+```
+http://<this-machine-ip>:8099/setup/phone
+```
+
+The page detects the phone and walks through it, including the step everyone
+skips:
+
+| | |
+|---|---|
+| **iPhone / iPad** | Install the profile → **Settings → General → About → Certificate Trust Settings → switch it ON**. Installing alone is not enough; Apple requires the second switch. |
+| **Android** | Download the certificate → open it → name it `QMS` → choose **CA certificate** → confirm your screen lock. |
+| **Android, no certificate** | In Chrome open `chrome://flags`, search `unsafely-treat-insecure-origin-as-secure`, paste the **http** address, relaunch. This skips the whole certificate route. |
+
+Then the scanner uses the secure address:
+
+```
+https://<this-machine-ip>:8443
+```
+
+`Setup & Addresses` on the sign-in screen shows this address with its own QR code,
+so nobody has to type it.
+
+**Both listeners run at once, from one service.** The plain port is unchanged and
+is where **POS** and **BACKSTORE** belong — they never need a camera and never
+need to install anything. Only the **SCANNER** uses the secure port. If the secure
+port is busy, QMS says so and serves the plain port anyway rather than taking the
+whole store down.
+
+### If you would rather not install anything on the phones
+
+**A USB barcode scanner.** It behaves as a keyboard: it types the SO number and
+presses Enter. Plain HTTP, no camera, no certificate, no internet, roughly
+RM50–150 once. QMS is built for it — on a non-HTTPS page it **opens and focuses
+the scan box by itself** and **re-focuses after every scan**, so a full day of
+scanning needs no screen taps. Verified by driving the field key-by-key:
 
 ```
 after sign-in    manualOpen: True   focused: 'manualCode'   (no taps needed)
@@ -490,14 +556,20 @@ shot 1           SCANNED ✓ #001 MACSO26-00142463
 shot 2           SCANNED ✓ #002 MACSO26-00142464   (still armed)
 ```
 
-**2. The camera on the store computer.** The **SCANNER** role at
-`http://localhost:8099` on the machine itself — zero configuration, and the
-fallback if the gun is not there yet.
+Also still there: the camera on the **store computer itself**
+(`http://localhost:8099` is already a secure context), and typing the SO number.
 
-**3. Manually.** Type the SO number. Always available.
+### If the store's address changes
 
-**POS** and **BACKSTORE** never use the camera, so those can be any phone or
-tablet on the store wifi.
+The certificate names every address the machine answers on, and `make_cert.py`
+rebuilds it when a new one appears — while keeping the **same** CA, so phones stay
+trusted. If a phone suddenly shows a certificate error, the box moved address:
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; cd "$D" && ./venv/bin/python make_cert.py
+```
+
+Then restart. Re-installing the profile on the phones is **not** needed.
 
 ---
 
@@ -750,6 +822,7 @@ python3 -m venv venv
 | `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
+| `deploy/test_https.py` | 34 | **The phone-scanner path**: the local CA, that the certificate covers every address the box answers on, that it rebuilds when the address moves but keeps the same CA (or every phone in the store silently loses trust), that HTTPS is trusted with the CA and **rejected** without it, and that the iOS profile is a real profile |
 | `deploy/test_readme.py` | 25 | **Every copy-paste one-liner in this README, executed** against a real install — a README nobody has run is worse than none |
 | `deploy/test_lifecycle.py` | 47 | install → uninstall → **re-install with the data intact** → purge, that a bare `--purge` refuses, and that `qms.sh doctor` correctly reports a stopped install and a running one |
 

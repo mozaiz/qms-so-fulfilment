@@ -76,6 +76,15 @@ if m:
           show_pos != -1 and (await_pos == -1 or show_pos < await_pos),
           f"show at {show_pos}, first await at {await_pos}")
 
+print("\n== the phone-camera path is reachable from the UI ==")
+check("the setup screen has a phone-scanning box", 'id="phoneBox"' in html)
+check("   ... showing the secure address", 'id="addrTls"' in html)
+check("   ... with its own QR", 'id="qrTls"' in html)
+check("   ... and a link to the guided setup page", 'href="/setup/phone"' in html)
+# a box that is never populated is worse than no box: staff see a blank panel
+for el in ("phoneBox", "addrTls", "noteTls", "qrTls"):
+    check(f"   ... and JS fills in {el}", re.search(r'\$\("' + el + r'"\)', js) is not None)
+
 print("\n== the barcode-gun path (the outlet way to scan) ==")
 # At an outlet the page is plain HTTP, so the camera can never work there and a
 # USB gun is the primary input. A gun only works if the field has focus, so the

@@ -35,6 +35,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      # A tag and the code inside it must agree. Publishing v0.8.4 with an app
+      # that reports 0.8.3 means everyone who pins QMS_REF=v0.8.4 gets a version
+      # line that contradicts what they asked for — and the update bar compares
+      # those strings, so it misbehaves too. Cheap to check, invisible otherwise.
+      - name: The tag and the code must agree
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            echo "not a tag build — skipping"
+            exit 0
+          fi
+          CODE=$(sed -n 's/.*version="\([0-9][^"]*\)".*/\1/p' app.py | head -1)
+          JS=$(sed -n 's/.*var APP_VER = "\([^"]*\)".*/\1/p' static/js/app.js | head -1)
+          echo "tag: $TAG   app.py: $CODE   app.js: $JS"
+          test "$TAG" = "v$CODE" || { echo "::error::tag $TAG does not match app.py version $CODE — bump the version before tagging"; exit 1; }
+          test "$JS" = "$CODE" || { echo "::error::app.js says $JS but app.py says $CODE"; exit 1; }
+
       - name: Work out the version
         id: v
         run: |

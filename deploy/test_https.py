@@ -252,6 +252,11 @@ try:
           "localhost" in page and "this phone" in page.lower())
     check("   ... and gives the Android chrome://flags route",
           "unsafely-treat-insecure-origin-as-secure" in page)
+    # iOS installs a profile; Android cannot open one and needs the bare cert.
+    # Two buttons, two different files — and getting this wrong is invisible
+    # until a store tries it.
+    check("   ... and sends iOS to the profile, Android to the bare certificate",
+          'os === "ios" ? "/setup/ca.mobileconfig" : "/setup/ca.crt"' in page)
     check("   ... and never caches a certificate download",
           (hdrs.get("cache-control") or "").startswith("no-store"))
 

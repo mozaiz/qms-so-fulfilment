@@ -155,8 +155,11 @@ function pick(os) {
   document.getElementById("btnAndroid").classList.toggle("sel", os === "android");
   document.getElementById("lastN").textContent = os === "ios" ? "4" : "5";
   var p = document.getElementById("dlProfile");
-  // the .mobileconfig is what iOS understands; Android wants the plain cert
-  p.href = "/setup/ca.mobileconfig";
+  // iOS understands a configuration profile; Android cannot use one at all and
+  // needs the plain certificate. Pointing an Android phone at the .mobileconfig
+  // downloads a file it has no way to open, and it looks like the store did it
+  // wrong rather than the page.
+  p.href = os === "ios" ? "/setup/ca.mobileconfig" : "/setup/ca.crt";
   p.textContent = os === "ios" ? "Install certificate" : "Download certificate";
   document.getElementById("dlHint").textContent = os === "ios"
     ? "Opens the Settings profile installer."

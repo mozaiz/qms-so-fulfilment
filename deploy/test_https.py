@@ -352,12 +352,13 @@ os.environ['QMS_CERT_DIR'] = {CERT_DIR!r}
 import netinfo, app
 app.CERT_DIR = {CERT_DIR!r}
 real = netinfo.local_ipv4
-netinfo.local_ipv4 = lambda: real() + ['192.168.68.129']   # the box moved
+netinfo.local_ipv4 = lambda: real() + ['192.0.2.77']   # a documentation address, never a real one: a test must not
+    # encode the author's own network
 app._lan_addresses = netinfo.local_ipv4
 print(app._cert_covers_current())
 """])
     check("   ... and it DETECTS a moved address", "'ok': False" in stale.stdout, stale.stdout.strip()[:90])
-    check("   ... naming the address it lacks", "192.168.68.129" in stale.stdout)
+    check("   ... naming the address it lacks", "192.0.2.77" in stale.stdout)
 
     st, body, _ = get(f"http://127.0.0.1:{HTTP_PORT}/setup/phone")
     page2 = body.decode(errors="replace")

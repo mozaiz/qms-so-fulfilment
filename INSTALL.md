@@ -171,7 +171,7 @@ disappear from the system.
 The **camera only works on the computer running QMS**, or over HTTPS.
 
 Browsers only hand over a camera on a "secure" page. `http://localhost` counts as
-secure — an address like `http://192.168.0.25` does **not**. So:
+secure — an address like `http://192.168.1.25` does **not**. So:
 
 - **SCANNER** → use the QMS computer itself (`http://localhost:8099`). Camera works.
 - **POS / BACKSTORE** → any device is fine. They don't use the camera.

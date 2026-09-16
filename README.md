@@ -155,6 +155,10 @@ CI builds the archives, **installs one in a clean container and boots it** to pr
 it works, then attaches `qms-<version>.zip`, `.tar.gz` and `SHA256SUMS.txt` to the
 release.
 
+Security model, and what must never be done with this: **[SECURITY.md](SECURITY.md)**.
+Short version: QMS trusts its network. Run it on `localhost` and the store wifi,
+never on a public URL.
+
 Licence: MIT — see [LICENSE](LICENSE).
 
 ---
@@ -234,7 +238,7 @@ D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; sh "$D/qms.sh" start
     Last backup    qms_2026-09-15_0330  (30 kept)
 
     Open on this computer : http://localhost:8099
-    Open on other devices : http://192.168.0.31:8099
+    Open on other devices : http://192.168.1.31:8099
 ```
 
 ### Stopping and starting does not touch your data
@@ -519,7 +523,7 @@ secure; a LAN IP over plain HTTP does not. Measured in a real browser against a
 real QMS:
 
 ```
-A  http://192.168.0.25:8099       isSecureContext False   mediaDevices missing
+A  http://192.168.1.25:8099       isSecureContext False   mediaDevices missing
 B  https://… (untrusted cert)     isSecureContext False   mediaDevices missing
 C  https://… (store CA installed) isSecureContext True    mediaDevices present
 ```
@@ -846,6 +850,7 @@ python3 -m venv venv
 | `deploy/test_install_linux.sh` | 21 | The installer on Linux, a real install, then the full API suite against the installed copy; preflight in all four states |
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
+| `deploy/test_secrets.py` | 23 | **Every blob in every commit**, plus the working tree, scanned for credential shapes — a token deleted in a later commit is still in the history. Also asserts `certs/`, `qms.env` and `*.db` stay ignored |
 | `deploy/test_guide.py` | 35 | **The printed setup sheet**: fits A4, keeps out of the print margins, is not half empty, and **every QR code is decoded** and checked against the address it claims to be — a sheet on a wall is not debuggable, and a QR pointing at the wrong address is worse than no QR |
 | `deploy/test_https.py` | 34 | **The phone-scanner path**: the local CA, that the certificate covers every address the box answers on, that it rebuilds when the address moves but keeps the same CA (or every phone in the store silently loses trust), that HTTPS is trusted with the CA and **rejected** without it, and that the iOS profile is a real profile |
 | `deploy/test_readme.py` | 25 | **Every copy-paste one-liner in this README, executed** against a real install — a README nobody has run is worse than none |

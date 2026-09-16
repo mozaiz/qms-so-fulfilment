@@ -22,7 +22,11 @@ jobs:
         python: ["3.9", "3.12"]
         port: [8199, 8299]
     steps:
+      # fetch-depth 0: the secret scan walks every blob in every commit, and a
+      # shallow checkout would make it pass by looking at almost nothing.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -83,6 +87,7 @@ jobs:
           python deploy/test_readme.py
           python deploy/test_https.py
           python deploy/test_guide.py
+          python deploy/test_secrets.py
           # The release archives ship whatever this produces. A file missing here
           # is an outlet downloading an app that cannot boot, and it would only be
           # discovered at tag time — so build the archive on every push.
@@ -100,7 +105,11 @@ jobs:
     name: Server starts with a clean database
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 0: the secret scan walks every blob in every commit, and a
+      # shallow checkout would make it pass by looking at almost nothing.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

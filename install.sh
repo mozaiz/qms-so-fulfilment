@@ -283,7 +283,7 @@ do_uninstall() {
              qms.sh qms-backup.sh \
              make_test_barcodes.py make_qr_card.py make_preview.py seed_demo.py \
              make_install_guide.py \
-             test_flow.py README.md INSTALL.md LICENSE START-HERE.txt \
+             test_flow.py README.md INSTALL.md SECURITY.md LICENSE START-HERE.txt \
              Dockerfile docker-compose.yml qms.env.example; do
       rm -f "$APP_DIR/$f" 2>/dev/null || true
     done

@@ -82,6 +82,10 @@ jobs:
           python deploy/test_frontend.py
           python deploy/test_readme.py
           python deploy/test_https.py
+          # The release archives ship whatever this produces. A file missing here
+          # is an outlet downloading an app that cannot boot, and it would only be
+          # discovered at tag time — so build the archive on every push.
+          python deploy/package.py ci-test
           bash deploy/test_install_linux.sh
           python deploy/test_persistence.py
           python deploy/test_lifecycle.py

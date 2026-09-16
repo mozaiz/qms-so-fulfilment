@@ -48,6 +48,7 @@ SKIP_NAME = {"test_barcodes.png"}
 # which is precisely the failure this list exists to make impossible.
 REQUIRED = [
     "app.py", "netinfo.py", "make_cert.py", "make_install_guide.py", "SECURITY.md",
+    "deploy/test_load.py",
     "run.sh", "install.sh", "requirements.txt",
     "static/index.html", "static/js/app.js", "static/phone-setup.html",
 ]

@@ -825,6 +825,83 @@ the answer when someone says "I did that already".
 
 ---
 
+## Capacity — what a store actually asks for, and where it breaks
+
+Measured against a real QMS, not estimated. `deploy/test_load.py`:
+
+| A 250-SO day, 12h, 7 devices | |
+|---|---|
+| total requests | 61,480 over 12 hours = **1.42 req/s** |
+| of which polling | 60,480 — **98%** |
+| of which SO work | 1,000 — 250 SOs x 4 steps, **1.6%** |
+| pushed as hard as it will go | **157 req/s**, p99 under 200ms, no errors |
+
+One SO every **2.9 minutes**. The load is not the SOs — it is every device asking
+every five seconds, and that number is *identical* whether 50 or 500 SOs move
+through the store in a day. So the SO volume barely matters: 300/day costs about
+the same as 250.
+
+A store therefore runs at roughly **1% of what the box can do**. Throughput is not
+what you need to worry about at 80 outlets.
+
+### It does not get slower as the data grows
+
+Every poll asks for **today**, and the queries are indexed on
+`(store_id, day_key)`. On a database carrying a full **year** — 91,512 rows:
+
+| view | fresh | one year | change |
+|---|---|---|---|
+| today | 3.57ms | 3.89ms | **+0.32ms** |
+| queue | 0.05ms | 0.05ms | **+0.00ms** |
+
+A poll happens every 5,000ms. Over HTTP the median is the same with a year behind
+it as without (113.4ms vs 113.7ms) — and that figure is mostly the client
+serialising the day's rows, not the query, which is why the table above is the
+one to read.
+
+### And the queue stays correct while it is busy
+
+Twelve rounds of four POS tapping the same SO in the same instant: **exactly one
+winner, every round**. That is why this uses SQLite with a compare-and-swap
+instead of a spreadsheet file, and it is the invariant everything else rests on —
+two counters claiming one SO means two staff walking the same item to two
+different customers.
+
+### So what actually takes a store down?
+
+Not load. In order of likelihood:
+
+1. **POS 1 is switched off, or asleep.** It *is* the server; every other device is
+   just a browser.
+2. **The store wifi.** No network, no queue.
+3. **A backup nobody has ever tried to restore.**
+4. **The scanner phone's certificate** — one minute per phone, once, and the iOS
+   Full Trust switch that everyone skips.
+5. **Someone runs the installer from `main` and a bad commit lands** — pin
+   `QMS_REF`.
+
+### How many devices before it stops coping
+
+`--ramp` adds devices until polls get slow. On a Wyse 5070 — a low-power thin
+client, not a workstation:
+
+| devices | req/s | p95 | errors |
+|---|---|---|---|
+| **7** (a store) | 1.4 | 43ms | 0 |
+| 56 | 11 | 283ms | 0 |
+| **112** | 22 | 482ms | 0 |
+| 224 | 42 | 1050ms | 0 |
+
+**16x a busy store's device count before a poll takes half a second**, and not one
+failed request anywhere on the way up. This is not a machine you need to
+over-specify.
+
+```bash
+D=/opt/qms; [ -d "$D" ] || D="$HOME/QMS"; cd "$D" && ./venv/bin/python deploy/test_load.py
+```
+
+Add `--ramp` to find this machine's own ceiling rather than replaying a day.
+
 ## Development
 
 ```bash
@@ -851,6 +928,7 @@ python3 -m venv venv
 | `deploy/test_install_macos.sh` | 30 | The macOS branch with `uname`/`launchctl`/`ipconfig`/`caffeinate` stubbed, the generated plists validated with `plistlib`, and the backup run for real |
 | `deploy/test_persistence.py` | 8 | That stopping, restarting, hard-killing and re-installing **never lose the day's data** |
 | `deploy/test_persistence.py` | 9 | Data survives stop/restart/SIGKILL — **and two listeners can start on a fresh database at the same time**, which is a real race on a first install and used to kill the scanner silently |
+| `deploy/test_load.py` | — | **Not in CI — it takes twelve minutes.** Replays a store's whole trading day against the real API, then a year of history, then ramps devices until polls degrade. Run it by hand when the numbers matter |
 | `deploy/test_secrets.py` | 23 | **Every blob in every commit**, plus the working tree, scanned for credential shapes — a token deleted in a later commit is still in the history. Also asserts `certs/`, `qms.env` and `*.db` stay ignored |
 | `deploy/test_guide.py` | 35 | **The printed setup sheet**: fits A4, keeps out of the print margins, is not half empty, and **every QR code is decoded** and checked against the address it claims to be — a sheet on a wall is not debuggable, and a QR pointing at the wrong address is worse than no QR |
 | `deploy/test_https.py` | 34 | **The phone-scanner path**: the local CA, that the certificate covers every address the box answers on, that it rebuilds when the address moves but keeps the same CA (or every phone in the store silently loses trust), that HTTPS is trusted with the CA and **rejected** without it, and that the iOS profile is a real profile |
